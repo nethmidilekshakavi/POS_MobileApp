@@ -16,14 +16,15 @@ import {
   SafeAreaView,
   useSafeAreaInsets,
 } from "react-native-safe-area-context";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { getMenuCategories, getMenusByCategory, searchMenus } from "../api/menu";
 import { getRunningOrders } from "../api/orders";
 import { MenuCategory, MenuItem } from "../api/types";
+import { API_BASE_URL } from "../api/client";
 import SideDrawer from "../components/SideDrawer";
 
-// 👇 CHANGE THIS to your actual backend base URL (no trailing slash)
-// e.g. "http://192.168.1.5:5000" or "https://your-api.com"
-const API_BASE_URL = "https://demo.trackerstay.com";
+// Must match the AsyncStorage key used in api/client.ts's request interceptor
+const AUTH_TOKEN_KEY = "auth_token";
 
 interface DashboardScreenProps {
   userName: string;
@@ -42,13 +43,18 @@ function formatPrice(item: MenuItem): string {
 
 // Handles both full URLs ("https://...") and relative paths ("/uploads/x.jpg")
 // returned by the backend. Relative paths get the API_BASE_URL prepended.
+// 👇 If your backend serves images via a Laravel storage symlink, uncomment
+// the STORAGE_PREFIX line below and test — this is the most common reason
+// for a 404 on an otherwise-correct-looking image path.
+const STORAGE_PREFIX = "/storage"; // set to "" if your backend doesn't need this
+
 function getImageUrl(image?: string | null): string | null {
   if (!image) return null;
   if (image.startsWith("http://") || image.startsWith("https://")) {
     return image;
   }
   const path = image.startsWith("/") ? image : `/${image}`;
-  return `${API_BASE_URL}${path}`;
+  return `${API_BASE_URL}${STORAGE_PREFIX}${path}`;
 }
 
 export default function DashboardScreen({
@@ -67,7 +73,15 @@ export default function DashboardScreen({
   const [runningCount, setRunningCount] = useState(0);
   const [loading, setLoading] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [authToken, setAuthToken] = useState<string | null>(null);
   const insets = useSafeAreaInsets();
+
+  // Load auth token once, so it can be attached to image requests below
+  useEffect(() => {
+    AsyncStorage.getItem(AUTH_TOKEN_KEY)
+      .then(setAuthToken)
+      .catch((err) => console.error("Failed to load auth token:", err));
+  }, []);
 
   // Load categories once
   useEffect(() => {
@@ -274,7 +288,12 @@ export default function DashboardScreen({
               <View style={styles.menuImageWrap}>
                 {imageUrl ? (
                   <Image
-                    source={{ uri: imageUrl }}
+                    source={{
+                      uri: imageUrl,
+                      headers: authToken
+                        ? { Authorization: `Bearer ${authToken}` }
+                        : undefined,
+                    }}
                     style={styles.menuImage}
                     onError={(e) =>
                       console.warn(

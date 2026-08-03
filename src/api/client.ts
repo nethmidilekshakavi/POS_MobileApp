@@ -1,8 +1,11 @@
 import axios from "axios";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
+
+export const API_BASE_URL = "https://demo.trackerstay.com";
+
 const apiClient = axios.create({
-  baseURL: "https://demo.trackerstay.com",
+  baseURL: API_BASE_URL,
   headers: {
     "Content-Type": "application/json",
   },
