@@ -3,6 +3,8 @@ import { StatusBar } from "expo-status-bar";
 import LoginScreen from "./src/screens/LoginScreen";
 import DashboardScreen from "./src/screens/DashboardScreen";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { SafeAreaProvider } from "react-native-safe-area-context";
+
 
 type Page = "login" | "dashboard" | "history";
 
@@ -23,6 +25,7 @@ export default function App() {
 
   return (
     <>
+        <SafeAreaProvider>
       <StatusBar style="dark" />
       {currentPage === "login" && (
         <LoginScreen onLoginSuccess={handleLoginSuccess} />
@@ -41,6 +44,7 @@ export default function App() {
           onNavigate={(page) => setCurrentPage(page)}
         />
       )}
+      </SafeAreaProvider>
     </>
   );
 }

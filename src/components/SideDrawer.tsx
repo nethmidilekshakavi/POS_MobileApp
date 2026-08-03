@@ -26,8 +26,7 @@ export default function SideDrawer({
   return (
     <Modal visible={isOpen} transparent animationType="fade">
       <View style={styles.overlay}>
-        <TouchableOpacity style={styles.overlayTouchable} onPress={onClose} />
-
+        {/* Drawer renders FIRST so it sits on the LEFT in a row layout */}
         <View style={styles.drawer}>
           <ScrollView>
             <View style={styles.drawerHeader}>
@@ -83,6 +82,9 @@ export default function SideDrawer({
             </View>
           </ScrollView>
         </View>
+
+        {/* Tappable backdrop renders AFTER, filling the remaining space to the right */}
+        <TouchableOpacity style={styles.overlayTouchable} onPress={onClose} />
       </View>
     </Modal>
   );
