@@ -22,6 +22,7 @@ import { getRunningOrders } from "../api/orders";
 import { MenuCategory, MenuItem } from "../api/types";
 import { API_BASE_URL } from "../api/client";
 import SideDrawer from "../components/SideDrawer";
+import AddToCartModal from "../components/AddToCartModal";
 
 // Must match the AsyncStorage key used in api/client.ts's request interceptor
 const AUTH_TOKEN_KEY = "auth_token";
@@ -32,6 +33,19 @@ interface DashboardScreenProps {
   onNavigate: (page: "dashboard" | "history") => void;
 }
 
+// One line item sitting in the local cart, before the order is placed via
+// POST /pos/orders. Matches the `cart[]` shape from the POS API docs.
+interface CartLine {
+  row_id: string; // "new" per docs — unique per line so qty can be bumped later
+  recipe_id: number;
+  name: string;
+  qty: number;
+  price: number;
+  total: number;
+  modifiers: { menu_id: number; name: string }[];
+  note?: string;
+}
+
 // API sometimes returns prices as strings ("850.00") instead of numbers.
 // This safely coerces whatever we get into a formatted "0.00" string.
 function formatPrice(item: MenuItem): string {
@@ -39,6 +53,13 @@ function formatPrice(item: MenuItem): string {
     item.final_price ?? item.original_price ?? (item as any).price ?? 0;
   const value = typeof raw === "string" ? parseFloat(raw) : raw;
   return Number.isFinite(value) ? value.toFixed(2) : "0.00";
+}
+
+function numericPrice(item: MenuItem): number {
+  const raw =
+    item.final_price ?? item.original_price ?? (item as any).price ?? 0;
+  const value = typeof raw === "string" ? parseFloat(raw) : raw;
+  return Number.isFinite(value) ? (value as number) : 0;
 }
 
 // Handles both full URLs ("https://...") and relative paths ("/uploads/x.jpg")
@@ -75,6 +96,11 @@ export default function DashboardScreen({
   const [searching, setSearching] = useState(false);
   const [authToken, setAuthToken] = useState<string | null>(null);
   const insets = useSafeAreaInsets();
+
+  // --- Add-to-cart popup state ---
+  const [modalItem, setModalItem] = useState<MenuItem | null>(null);
+  const [modalVisible, setModalVisible] = useState(false);
+  const [cart, setCart] = useState<CartLine[]>([]);
 
   // Load auth token once, so it can be attached to image requests below
   useEffect(() => {
@@ -160,6 +186,33 @@ export default function DashboardScreen({
   const displayedItems = isSearchActive ? searchResults : menuItems;
   const isLoadingList = isSearchActive ? searching : loading;
 
+  // Tapping "+ ADD" always opens the options popup — if the item has no
+  // modifiers the modal just shows an empty state and a plain Add to cart.
+  function handleAddPress(item: MenuItem) {
+    setModalItem(item);
+    setModalVisible(true);
+  }
+
+  function handleConfirmAddToCart(
+    item: MenuItem,
+    selectedModifiers: { id: number; name: string }[]
+  ) {
+    const price = numericPrice(item);
+    const line: CartLine = {
+      row_id: "new",
+      recipe_id: item.id,
+      name: item.name,
+      qty: 1,
+      price,
+      total: price,
+      modifiers: selectedModifiers.map((m) => ({
+        menu_id: m.id,
+        name: m.name,
+      })),
+    };
+    setCart((prev) => [...prev, line]);
+  }
+
   return (
     <SafeAreaView style={styles.container} edges={["top", "left", "right"]}>
       <StatusBar
@@ -173,6 +226,13 @@ export default function DashboardScreen({
         userName={userName}
         onNavigate={onNavigate}
         onLogout={onLogout}
+      />
+
+      <AddToCartModal
+        visible={modalVisible}
+        item={modalItem}
+        onClose={() => setModalVisible(false)}
+        onAddToCart={handleConfirmAddToCart}
       />
 
       {/* Header */}
@@ -325,7 +385,10 @@ export default function DashboardScreen({
                 </Text>
               </View>
 
-              <TouchableOpacity style={styles.addBtn}>
+              <TouchableOpacity
+                style={styles.addBtn}
+                onPress={() => handleAddPress(item)}
+              >
                 <Text style={styles.addBtnText}>+ ADD</Text>
               </TouchableOpacity>
             </View>
