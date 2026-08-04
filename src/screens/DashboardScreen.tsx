@@ -23,6 +23,7 @@ import { MenuCategory, MenuItem } from "../api/types";
 import { API_BASE_URL } from "../api/client";
 import SideDrawer from "../components/SideDrawer";
 import AddToCartModal from "../components/AddToCartModal";
+import CartPopup, { CartLine } from "../components/CartPopup";
 
 // Must match the AsyncStorage key used in api/client.ts's request interceptor
 const AUTH_TOKEN_KEY = "auth_token";
@@ -33,17 +34,10 @@ interface DashboardScreenProps {
   onNavigate: (page: "dashboard" | "history" | "cart") => void;
 }
 
-// One line item sitting in the local cart, before the order is placed via
-// POST /pos/orders. Matches the `cart[]` shape from the POS API docs.
-interface CartLine {
-  row_id: string; // "new" per docs — unique per line so qty can be bumped later
-  recipe_id: number;
-  name: string;
-  qty: number;
-  price: number;
-  total: number;
-  modifiers: { menu_id: number; name: string }[];
-  note?: string;
+// Client-side unique id for a cart line — separate from `row_id`, which is
+// the API's "new" / existing-detail-id concept used by POST /pos/orders.
+function makeLineId(): string {
+  return `line_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
 // API sometimes returns prices as strings ("850.00") instead of numbers.
@@ -101,6 +95,10 @@ export default function DashboardScreen({
   const [modalItem, setModalItem] = useState<MenuItem | null>(null);
   const [modalVisible, setModalVisible] = useState(false);
   const [cart, setCart] = useState<CartLine[]>([]);
+
+  // --- Cart popup state ---
+  const [cartVisible, setCartVisible] = useState(false);
+  const [placingOrder, setPlacingOrder] = useState(false);
 
   // Load auth token once, so it can be attached to image requests below
   useEffect(() => {
@@ -188,7 +186,10 @@ export default function DashboardScreen({
 
   // --- Cart summary (drives the floating "View Cart" bar) ---
   const cartItemCount = cart.reduce((sum, line) => sum + line.qty, 0);
-  const cartTotal = cart.reduce((sum, line) => sum + line.total, 0);
+  const cartTotal = cart.reduce(
+    (sum, line) => sum + Math.max(line.total - line.discount, 0),
+    0
+  );
 
   // Tapping "+ ADD" always opens the options popup — if the item has no
   // modifiers the modal just shows an empty state and a plain Add to cart.
@@ -230,12 +231,14 @@ export default function DashboardScreen({
       }
 
       const line: CartLine = {
+        id: makeLineId(),
         row_id: "new",
         recipe_id: item.id,
         name: item.name,
         qty: 1,
         price,
         total: price,
+        discount: 0,
         modifiers: selectedModifiers.map((m) => ({
           menu_id: m.id,
           name: m.name,
@@ -243,10 +246,61 @@ export default function DashboardScreen({
       };
       return [...prev, line];
     });
+    // Jump straight into the cart popup so the user sees what they just added
+    setCartVisible(true);
   }
 
   function handleViewCart() {
-    onNavigate("cart");
+    setCartVisible(true);
+  }
+
+  function handleIncrementLine(id: string) {
+    setCart((prev) =>
+      prev.map((line) =>
+        line.id === id
+          ? { ...line, qty: line.qty + 1, total: (line.qty + 1) * line.price }
+          : line
+      )
+    );
+  }
+
+  function handleDecrementLine(id: string) {
+    setCart((prev) =>
+      prev.map((line) =>
+        line.id === id && line.qty > 1
+          ? { ...line, qty: line.qty - 1, total: (line.qty - 1) * line.price }
+          : line
+      )
+    );
+  }
+
+  function handleRemoveLine(id: string) {
+    setCart((prev) => prev.filter((line) => line.id !== id));
+  }
+
+  function handleChangeDiscount(id: string, discount: number) {
+    setCart((prev) =>
+      prev.map((line) => (line.id === id ? { ...line, discount } : line))
+    );
+  }
+
+  function handleClearCart() {
+    setCart([]);
+  }
+
+  async function handlePlaceOrder() {
+    // TODO: wire this up to POST /pos/orders (see the POS API docs) — build
+    // the request body from `cart`, restaurant_id, table_id, steward_id etc.
+    setPlacingOrder(true);
+    try {
+      // await createOrder({ ...cart mapped to the API's cart[] shape... })
+      setCart([]);
+      setCartVisible(false);
+    } catch (err) {
+      console.error("Failed to place order:", err);
+    } finally {
+      setPlacingOrder(false);
+    }
   }
 
   return (
@@ -269,6 +323,19 @@ export default function DashboardScreen({
         item={modalItem}
         onClose={() => setModalVisible(false)}
         onAddToCart={handleConfirmAddToCart}
+      />
+
+      <CartPopup
+        visible={cartVisible}
+        cart={cart}
+        onHide={() => setCartVisible(false)}
+        onIncrement={handleIncrementLine}
+        onDecrement={handleDecrementLine}
+        onRemove={handleRemoveLine}
+        onChangeDiscount={handleChangeDiscount}
+        onClearCart={handleClearCart}
+        onPlaceOrder={handlePlaceOrder}
+        placingOrder={placingOrder}
       />
 
       {/* Header */}
