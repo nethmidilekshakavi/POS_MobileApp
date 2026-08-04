@@ -30,7 +30,7 @@ const AUTH_TOKEN_KEY = "auth_token";
 interface DashboardScreenProps {
   userName: string;
   onLogout: () => void;
-  onNavigate: (page: "dashboard" | "history") => void;
+  onNavigate: (page: "dashboard" | "history" | "cart") => void;
 }
 
 // One line item sitting in the local cart, before the order is placed via
@@ -186,6 +186,10 @@ export default function DashboardScreen({
   const displayedItems = isSearchActive ? searchResults : menuItems;
   const isLoadingList = isSearchActive ? searching : loading;
 
+  // --- Cart summary (drives the floating "View Cart" bar) ---
+  const cartItemCount = cart.reduce((sum, line) => sum + line.qty, 0);
+  const cartTotal = cart.reduce((sum, line) => sum + line.total, 0);
+
   // Tapping "+ ADD" always opens the options popup — if the item has no
   // modifiers the modal just shows an empty state and a plain Add to cart.
   function handleAddPress(item: MenuItem) {
@@ -198,19 +202,51 @@ export default function DashboardScreen({
     selectedModifiers: { id: number; name: string }[]
   ) {
     const price = numericPrice(item);
-    const line: CartLine = {
-      row_id: "new",
-      recipe_id: item.id,
-      name: item.name,
-      qty: 1,
-      price,
-      total: price,
-      modifiers: selectedModifiers.map((m) => ({
-        menu_id: m.id,
-        name: m.name,
-      })),
-    };
-    setCart((prev) => [...prev, line]);
+    setCart((prev) => {
+      // If this exact item (same recipe_id, same modifiers) is already in
+      // the cart, just bump the qty instead of adding a duplicate row.
+      const modifierKey = selectedModifiers
+        .map((m) => m.id)
+        .sort((a, b) => a - b)
+        .join(",");
+      const existingIndex = prev.findIndex((line) => {
+        const lineKey = line.modifiers
+          .map((m) => m.menu_id)
+          .sort((a, b) => a - b)
+          .join(",");
+        return line.recipe_id === item.id && lineKey === modifierKey;
+      });
+
+      if (existingIndex !== -1) {
+        const updated = [...prev];
+        const existing = updated[existingIndex];
+        const newQty = existing.qty + 1;
+        updated[existingIndex] = {
+          ...existing,
+          qty: newQty,
+          total: newQty * existing.price,
+        };
+        return updated;
+      }
+
+      const line: CartLine = {
+        row_id: "new",
+        recipe_id: item.id,
+        name: item.name,
+        qty: 1,
+        price,
+        total: price,
+        modifiers: selectedModifiers.map((m) => ({
+          menu_id: m.id,
+          name: m.name,
+        })),
+      };
+      return [...prev, line];
+    });
+  }
+
+  function handleViewCart() {
+    onNavigate("cart");
   }
 
   return (
@@ -339,7 +375,12 @@ export default function DashboardScreen({
         keyExtractor={(item) => item.id.toString()}
         contentContainerStyle={[
           styles.list,
-          { paddingBottom: insets.bottom + 24 },
+          // Leave room at the bottom so the last card isn't hidden behind
+          // the floating "View Cart" bar when the cart has items.
+          {
+            paddingBottom:
+              insets.bottom + (cart.length > 0 ? 96 : 24),
+          },
         ]}
         renderItem={({ item }) => {
           const imageUrl = getImageUrl(item.image as any);
@@ -395,6 +436,30 @@ export default function DashboardScreen({
           );
         }}
       />
+
+      {/* Floating "View Cart" summary bar — shown only once something has
+          been added to the cart. Mirrors the reference screenshot: item
+          count + running total on the left, "View Cart" link on the right. */}
+      {cart.length > 0 && (
+        <TouchableOpacity
+          activeOpacity={0.9}
+          onPress={handleViewCart}
+          style={[
+            styles.viewCartBar,
+            { bottom: insets.bottom + 12 },
+          ]}
+        >
+          <View>
+            <Text style={styles.viewCartCount}>
+              {cartItemCount} ITEM{cartItemCount !== 1 ? "S" : ""}
+            </Text>
+            <Text style={styles.viewCartTotal}>
+              Rs. {cartTotal.toFixed(2)}
+            </Text>
+          </View>
+          <Text style={styles.viewCartLink}>View Cart</Text>
+        </TouchableOpacity>
+      )}
     </SafeAreaView>
   );
 }
@@ -587,5 +652,40 @@ const styles = StyleSheet.create({
     textAlign: "center",
     color: "#9ca3af",
     marginTop: 40,
+  },
+  // --- Floating "View Cart" bar ---
+  viewCartBar: {
+    position: "absolute",
+    left: 20,
+    right: 20,
+    backgroundColor: "#f4695f",
+    borderRadius: 16,
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.2,
+    shadowRadius: 8,
+    elevation: 6,
+  },
+  viewCartCount: {
+    color: "#ffffff",
+    fontSize: 12,
+    fontWeight: "700",
+    opacity: 0.9,
+    marginBottom: 2,
+  },
+  viewCartTotal: {
+    color: "#ffffff",
+    fontSize: 18,
+    fontWeight: "800",
+  },
+  viewCartLink: {
+    color: "#ffffff",
+    fontSize: 16,
+    fontWeight: "800",
   },
 });
