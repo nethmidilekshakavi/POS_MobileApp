@@ -39,9 +39,7 @@ export default function LoadingScreen() {
       style={styles.container}
       resizeMode="cover"
     >
-      <View style={styles.bottomContent}>
 
-      </View>
     </ImageBackground>
   );
 }

@@ -8,21 +8,17 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 
 type Page = "loading" | "login" | "dashboard" | "history";
 
-// Must match the keys used elsewhere (e.g. DashboardScreen's image auth
-// headers, api/client.ts's request interceptor).
 const AUTH_TOKEN_KEY = "auth_token";
 const USER_NAME_KEY = "user_name";
 
 // Splash stays up at least this long so it doesn't just flash on a fast
-// AsyncStorage read.
-const MIN_SPLASH_MS = 1200;
+// AsyncStorage read. Bumped up so it doesn't feel rushed.
+const MIN_SPLASH_MS = 2500;
 
 export default function App() {
   const [currentPage, setCurrentPage] = useState<Page>("loading");
   const [userName, setUserName] = useState("");
 
-  // Bootstrap: check for an existing session while the splash is showing,
-  // then route straight to the dashboard or the login screen.
   useEffect(() => {
     let cancelled = false;
 
@@ -67,14 +63,7 @@ export default function App() {
       {currentPage === "login" && (
         <LoginScreen onLoginSuccess={handleLoginSuccess} />
       )}
-      {currentPage === "dashboard" && (
-        <DashboardScreen
-          userName={userName}
-          onLogout={handleLogout}
-          onNavigate={(page) => setCurrentPage(page)}
-        />
-      )}
-      {currentPage === "history" && (
+      {(currentPage === "dashboard" || currentPage === "history") && (
         <DashboardScreen
           userName={userName}
           onLogout={handleLogout}
