@@ -1,65 +1,20 @@
 import React, { useEffect, useState } from "react";
 import {
-  Modal,
   View,
   Text,
   TouchableOpacity,
   StyleSheet,
+  Modal,
+  Pressable,
   ScrollView,
   Image,
-  ActivityIndicator,
 } from "react-native";
 import { MenuItem } from "../api/types";
 import { API_BASE_URL } from "../api/client";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 
-const AUTH_TOKEN_KEY = "auth_token";
-
-// Shape we expect a "modifier" to have. If your MenuItem type doesn't
-// declare `modifiers` yet, add this to it:
-//
-//   modifiers?: {
-//     id: number;
-//     menu_id?: number;
-//     name: string;
-//     price?: number | string;
-//     image?: string | null;
-//   }[];
-interface Modifier {
-  id: number;
-  menu_id?: number;
-  name: string;
-  price?: number | string;
-  image?: string | null;
-}
-
-interface AddToCartModalProps {
-  visible: boolean;
-  item: MenuItem | null;
-  onClose: () => void;
-  // Called with the item, the modifiers the user picked, and quantity (always 1
-  // from this modal — bump qty later from the cart screen if you need to).
-  onAddToCart: (item: MenuItem, selectedModifiers: Modifier[]) => void;
-}
-
-function formatModifierPrice(price?: number | string): string {
-  const value = typeof price === "string" ? parseFloat(price) : price ?? 0;
-  return Number.isFinite(value) ? (value as number).toFixed(2) : "0.00";
-}
-
-function numericItemPrice(item: MenuItem): number {
-  const raw =
-    (item as any).final_price ??
-    (item as any).original_price ??
-    (item as any).price ??
-    0;
-  const value = typeof raw === "string" ? parseFloat(raw) : raw;
-  return Number.isFinite(value) ? (value as number) : 0;
-}
-
-// Same image-url logic as DashboardScreen — handles both full URLs and
-// relative "/uploads/x.jpg" paths from the backend.
-const STORAGE_PREFIX = "/storage"; // set to "" if your backend doesn't need this
+// Mirrors DashboardScreen's getImageUrl — handles both full URLs and
+// relative paths ("/uploads/x.jpg") returned by the backend.
+const STORAGE_PREFIX = "/storage";
 function getImageUrl(image?: string | null): string | null {
   if (!image) return null;
   if (image.startsWith("http://") || image.startsWith("https://")) {
@@ -69,77 +24,66 @@ function getImageUrl(image?: string | null): string | null {
   return `${API_BASE_URL}${STORAGE_PREFIX}${path}`;
 }
 
+// A single selectable option shown under its own "Choice N" heading.
+export interface ModifierChoice {
+  id: number;
+  name: string;
+  price?: number | string;
+  image?: string | null;
+}
+
+interface AddToCartModalProps {
+  visible: boolean;
+  item: MenuItem | null;
+  onClose: () => void;
+  onAddToCart: (
+    item: MenuItem,
+    selectedModifiers: { id: number; name: string }[]
+  ) => void;
+}
+
+// The POS API's MenuItem type (see api/types.ts) has no field carrying a
+// list of swappable choices — the "Choose Options" list is a fixed local
+// template for rice dishes: the dish itself, plus the two standard sides.
+// If the backend later adds a real modifiers field to MenuItem, swap this
+// function out for reading that field directly.
+function getRiceModifierChoices(item: MenuItem): ModifierChoice[] {
+  return [
+    { id: item.id * 1000 + 1, name: item.name, price: 0, image: item.image },
+    { id: item.id * 1000 + 2, name: "Vegetable Salad (for rice)", price: 0 },
+    { id: item.id * 1000 + 3, name: "Chillie paste", price: 0 },
+  ];
+}
+
+function formatModifierPrice(price?: number | string): string {
+  if (price === undefined || price === null) return "0.00";
+  const value = typeof price === "string" ? parseFloat(price) : price;
+  return Number.isFinite(value) ? value.toFixed(2) : "0.00";
+}
+
+// Menu items whose name doesn't contain "rice" have nothing to configure —
+// this modal is skipped entirely for them (see DashboardScreen's
+// handleAddPress), so this list only ever renders for rice dishes.
 export default function AddToCartModal({
   visible,
   item,
   onClose,
   onAddToCart,
 }: AddToCartModalProps) {
+  const modifiers: ModifierChoice[] = item ? getRiceModifierChoices(item) : [];
+
+  // Nothing is pre-selected — the user has to actively tap a choice for it
+  // to be included, and only checked choices get added to the cart.
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
-  const [previewLoading, setPreviewLoading] = useState(false);
-  const [previewPrice, setPreviewPrice] = useState<string | null>(null);
-  const [authToken, setAuthToken] = useState<string | null>(null);
 
-  const modifiers: Modifier[] = ((item as any)?.modifiers ?? []) as Modifier[];
-  const itemImageUrl = getImageUrl((item as any)?.image);
-
+  // Reset selection whenever a different item is opened
   useEffect(() => {
-    AsyncStorage.getItem(AUTH_TOKEN_KEY)
-      .then(setAuthToken)
-      .catch((err) => console.error("Failed to load auth token:", err));
-  }, []);
+    setSelectedIds(new Set());
+  }, [item?.id, visible]);
 
-  // Reset + pre-select every modifier by default whenever a new item opens,
-  // matching the "already highlighted" look in the design.
-  useEffect(() => {
-    if (visible && item) {
-      setSelectedIds(new Set(modifiers.map((m) => m.id)));
-      fetchPreview(item.id);
-    } else {
-      setSelectedIds(new Set());
-      setPreviewPrice(null);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visible, item?.id]);
+  if (!item) return null;
 
-  async function fetchPreview(menuId: number) {
-    setPreviewLoading(true);
-    try {
-      const token = await AsyncStorage.getItem(AUTH_TOKEN_KEY);
-      const res = await fetch(
-        `${API_BASE_URL}/api/pos/menus/preview_add_to_cart?menu_id=${menuId}`,
-        {
-          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-        }
-      );
-      const contentType = res.headers.get("content-type") || "";
-      if (!contentType.includes("application/json")) {
-        // Server returned HTML (a 404 / redirect page) instead of JSON —
-        // wrong path or auth issue. Bail out quietly instead of crashing
-        // JSON.parse, and log the raw body so it's easy to debug.
-        const text = await res.text();
-        console.error(
-          "preview_add_to_cart did not return JSON. Status:",
-          res.status,
-          "Body (first 200 chars):",
-          text.slice(0, 200)
-        );
-        return;
-      }
-      const json = await res.json();
-      if (json?.success && json?.data?.menu) {
-        const price =
-          json.data.menu.final_price ?? json.data.menu.original_price;
-        setPreviewPrice(formatModifierPrice(price));
-      }
-    } catch (err) {
-      console.error("Failed to load add-to-cart preview:", err);
-    } finally {
-      setPreviewLoading(false);
-    }
-  }
-
-  function toggleModifier(id: number) {
+  function toggleChoice(id: number) {
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) {
@@ -151,14 +95,14 @@ export default function AddToCartModal({
     });
   }
 
-  function handleAddToCart() {
+  function handleAdd() {
     if (!item) return;
-    const chosen = modifiers.filter((m) => selectedIds.has(m.id));
-    onAddToCart(item, chosen);
+    const selected = modifiers
+      .filter((m) => selectedIds.has(m.id))
+      .map((m) => ({ id: m.id, name: m.name }));
+    onAddToCart(item, selected);
     onClose();
   }
-
-  if (!item) return null;
 
   return (
     <Modal
@@ -167,121 +111,89 @@ export default function AddToCartModal({
       animationType="fade"
       onRequestClose={onClose}
     >
-      <View style={styles.backdrop}>
-        <View style={styles.sheet}>
-          <View style={styles.header}>
-            <Text style={styles.headerText}>Choose Options</Text>
-          </View>
-
-          <ScrollView
-            style={styles.body}
-            contentContainerStyle={{ paddingBottom: 8 }}
-          >
-            {/* Choice 1 is always the item itself — mandatory, shown with its
-                real menu image, not toggleable (you can't add it without it). */}
-            <View style={styles.choiceGroup}>
-              <Text style={styles.choiceLabel}>Choice 1</Text>
-              <View style={[styles.modifierRow, styles.modifierRowSelected]}>
-                {itemImageUrl ? (
-                  <Image
-                    source={{
-                      uri: itemImageUrl,
-                      headers: authToken
-                        ? { Authorization: `Bearer ${authToken}` }
-                        : undefined,
-                    }}
-                    style={styles.modifierImage}
-                  />
-                ) : (
-                  <View
-                    style={[
-                      styles.modifierImage,
-                      styles.modifierImagePlaceholder,
-                    ]}
-                  >
-                    <Text style={styles.noImageText}>No image</Text>
-                  </View>
-                )}
-                <View style={styles.modifierInfo}>
-                  <Text style={styles.modifierName}>{item.name}</Text>
-                  <Text style={styles.modifierPrice}>
-                    Rs {formatModifierPrice(numericItemPrice(item))}
-                  </Text>
-                </View>
-              </View>
+      <Pressable style={styles.backdrop} onPress={onClose}>
+        <Pressable style={styles.cardWrap} onPress={() => {}}>
+          <View style={styles.card}>
+            <View style={styles.header}>
+              <Text style={styles.headerText}>Choose Options</Text>
             </View>
 
-            {modifiers.map((mod, index) => {
-              const selected = selectedIds.has(mod.id);
-              return (
-                <View key={mod.id} style={styles.choiceGroup}>
-                  <Text style={styles.choiceLabel}>Choice {index + 2}</Text>
-                  <TouchableOpacity
-                    style={[
-                      styles.modifierRow,
-                      selected && styles.modifierRowSelected,
-                    ]}
-                    onPress={() => toggleModifier(mod.id)}
-                    activeOpacity={0.7}
-                  >
-                    {mod.image ? (
-                      <Image
-                        source={{ uri: mod.image }}
-                        style={styles.modifierImage}
-                      />
-                    ) : (
-                      <View
+            <ScrollView
+              style={styles.body}
+              contentContainerStyle={styles.bodyContent}
+              showsVerticalScrollIndicator={false}
+            >
+              {modifiers.length === 0 ? (
+                <Text style={styles.emptyText}>
+                  No optional add-ons for this item.
+                </Text>
+              ) : (
+                modifiers.map((choice, index) => {
+                  const isSelected = selectedIds.has(choice.id);
+                  const choiceImageUrl = getImageUrl(choice.image);
+                  return (
+                    <View key={choice.id} style={styles.choiceGroup}>
+                      <Text style={styles.choiceLabel}>
+                        Choice {index + 1}
+                      </Text>
+                      <TouchableOpacity
+                        activeOpacity={0.8}
+                        onPress={() => toggleChoice(choice.id)}
                         style={[
-                          styles.modifierImage,
-                          styles.modifierImagePlaceholder,
+                          styles.optionCard,
+                          isSelected && styles.optionCardSelected,
                         ]}
                       >
-                        <Text style={styles.noImageText}>No image</Text>
-                      </View>
-                    )}
-                    <View style={styles.modifierInfo}>
-                      <Text style={styles.modifierName}>{mod.name}</Text>
-                      <Text style={styles.modifierPrice}>
-                        Rs {formatModifierPrice(mod.price)}
-                      </Text>
+                        {choiceImageUrl ? (
+                          <Image
+                            source={{ uri: choiceImageUrl }}
+                            style={styles.optionImage}
+                          />
+                        ) : (
+                          <View
+                            style={[styles.optionImage, styles.optionImagePlaceholder]}
+                          >
+                            <Text style={styles.optionImagePlaceholderText}>
+                              No image
+                            </Text>
+                          </View>
+                        )}
+
+                        <View style={styles.optionInfo}>
+                          <Text style={styles.optionName}>{choice.name}</Text>
+                          <Text style={styles.optionPrice}>
+                            Rs {formatModifierPrice(choice.price)}
+                          </Text>
+                        </View>
+
+                        <View
+                          style={[
+                            styles.checkCircle,
+                            isSelected && styles.checkCircleSelected,
+                          ]}
+                        >
+                          {isSelected && (
+                            <Text style={styles.checkMark}>✓</Text>
+                          )}
+                        </View>
+                      </TouchableOpacity>
                     </View>
-                  </TouchableOpacity>
-                </View>
-              );
-            })}
+                  );
+                })
+              )}
+            </ScrollView>
 
-            {previewLoading && (
-              <ActivityIndicator
-                size="small"
-                color="#f4695f"
-                style={{ marginTop: 8 }}
-              />
-            )}
-            {!previewLoading && previewPrice && (
-              <Text style={styles.previewText}>
-                Item price: Rs {previewPrice}
-              </Text>
-            )}
-          </ScrollView>
-
-          <View style={styles.footer}>
-            <TouchableOpacity
-              style={styles.cancelBtn}
-              onPress={onClose}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.cancelBtnText}>Cancel</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.addBtn}
-              onPress={handleAddToCart}
-              activeOpacity={0.8}
-            >
-              <Text style={styles.addBtnText}>Add to cart</Text>
-            </TouchableOpacity>
+            <View style={styles.actionsRow}>
+              <TouchableOpacity style={styles.cancelBtn} onPress={onClose}>
+                <Text style={styles.cancelBtnText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.addBtn} onPress={handleAdd}>
+                <Text style={styles.addBtnText}>Add to cart</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-        </View>
-      </View>
+        </Pressable>
+      </Pressable>
     </Modal>
   );
 }
@@ -289,32 +201,48 @@ export default function AddToCartModal({
 const styles = StyleSheet.create({
   backdrop: {
     flex: 1,
-    backgroundColor: "rgba(0,0,0,0.45)",
+    backgroundColor: "rgba(17, 17, 27, 0.5)",
     justifyContent: "center",
-    paddingHorizontal: 20,
   },
-  sheet: {
+  cardWrap: {
+    marginHorizontal: 16,
+  },
+  card: {
     backgroundColor: "#ffffff",
-    borderRadius: 16,
+    borderRadius: 24,
     overflow: "hidden",
-    maxHeight: "80%",
+    maxHeight: "86%",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 14 },
+    shadowOpacity: 0.22,
+    shadowRadius: 28,
+    elevation: 14,
   },
   header: {
     backgroundColor: "#f4695f",
-    paddingVertical: 18,
-    paddingHorizontal: 20,
+    paddingVertical: 20,
+    paddingHorizontal: 22,
   },
   headerText: {
     color: "#ffffff",
-    fontSize: 20,
+    fontSize: 22,
     fontWeight: "800",
   },
   body: {
-    paddingHorizontal: 20,
-    paddingTop: 14,
+    paddingHorizontal: 22,
+  },
+  bodyContent: {
+    paddingTop: 18,
+    paddingBottom: 6,
+  },
+  emptyText: {
+    color: "#9ca3af",
+    fontSize: 14,
+    textAlign: "center",
+    paddingVertical: 24,
   },
   choiceGroup: {
-    marginBottom: 16,
+    marginBottom: 18,
   },
   choiceLabel: {
     fontSize: 14,
@@ -322,87 +250,106 @@ const styles = StyleSheet.create({
     color: "#1a1a2e",
     marginBottom: 8,
   },
-  modifierRow: {
+  optionCard: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
     borderWidth: 1.5,
     borderColor: "#e5e7eb",
-    borderRadius: 12,
+    borderRadius: 14,
     padding: 10,
+    backgroundColor: "#ffffff",
+    gap: 12,
   },
-  modifierRowSelected: {
+  optionCardSelected: {
     borderColor: "#f4695f",
-    backgroundColor: "#fff1f0",
+    backgroundColor: "#fff2f1",
   },
-  modifierImage: {
-    width: 48,
-    height: 48,
+  optionImage: {
+    width: 56,
+    height: 56,
     borderRadius: 10,
   },
-  modifierImagePlaceholder: {
-    backgroundColor: "#f0f0f0",
+  optionImagePlaceholder: {
+    backgroundColor: "#f3f4f6",
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 4,
+  },
+  optionImagePlaceholderText: {
+    fontSize: 10,
+    color: "#9ca3af",
+    fontWeight: "600",
+    textAlign: "center",
+  },
+  optionInfo: {
+    flex: 1,
+  },
+  optionName: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: "#1a1a2e",
+    marginBottom: 4,
+  },
+  optionPrice: {
+    fontSize: 13,
+    color: "#6b7280",
+    fontWeight: "600",
+  },
+  checkCircle: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    borderWidth: 1.5,
+    borderColor: "#d1d5db",
+    backgroundColor: "#ffffff",
     alignItems: "center",
     justifyContent: "center",
   },
-  noImageText: {
-    fontSize: 10,
-    color: "#9ca3af",
+  checkCircleSelected: {
+    backgroundColor: "#f4695f",
+    borderColor: "#f4695f",
   },
-  modifierInfo: {
-    flex: 1,
-  },
-  modifierName: {
-    fontWeight: "700",
+  checkMark: {
+    color: "#ffffff",
     fontSize: 14,
-    color: "#1a1a2e",
-    marginBottom: 2,
+    fontWeight: "800",
   },
-  modifierPrice: {
-    fontSize: 13,
-    color: "#6b7280",
-  },
-  noModifiers: {
-    color: "#9ca3af",
-    textAlign: "center",
-    paddingVertical: 20,
-  },
-  previewText: {
-    marginTop: 4,
-    fontSize: 13,
-    color: "#6b7280",
-    textAlign: "center",
-  },
-  footer: {
+  actionsRow: {
     flexDirection: "row",
     gap: 12,
-    padding: 20,
-    borderTopWidth: 1,
-    borderTopColor: "#f0f0f0",
+    paddingHorizontal: 22,
+    paddingTop: 8,
+    paddingBottom: 20,
   },
   cancelBtn: {
     flex: 1,
     borderWidth: 1.5,
     borderColor: "#e5e7eb",
-    borderRadius: 12,
-    paddingVertical: 14,
+    borderRadius: 14,
+    paddingVertical: 15,
     alignItems: "center",
+    backgroundColor: "#f9fafb",
   },
   cancelBtnText: {
-    fontWeight: "700",
     fontSize: 15,
+    fontWeight: "700",
     color: "#1a1a2e",
   },
   addBtn: {
     flex: 1.4,
     backgroundColor: "#f4695f",
-    borderRadius: 12,
-    paddingVertical: 14,
+    borderRadius: 14,
+    paddingVertical: 15,
     alignItems: "center",
+    shadowColor: "#f4695f",
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.3,
+    shadowRadius: 10,
+    elevation: 4,
   },
   addBtnText: {
-    fontWeight: "700",
     fontSize: 15,
+    fontWeight: "800",
     color: "#ffffff",
   },
 });

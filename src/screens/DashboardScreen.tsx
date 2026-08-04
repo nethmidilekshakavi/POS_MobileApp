@@ -24,6 +24,9 @@ import { API_BASE_URL } from "../api/client";
 import SideDrawer from "../components/SideDrawer";
 import AddToCartModal from "../components/AddToCartModal";
 import CartPopup, { CartLine } from "../components/CartPopup";
+import OrderDetailsPopup, {
+  OrderDetailsForm,
+} from "../components/OrderDetailsPopup";
 
 // Must match the AsyncStorage key used in api/client.ts's request interceptor
 const AUTH_TOKEN_KEY = "auth_token";
@@ -98,7 +101,10 @@ export default function DashboardScreen({
 
   // --- Cart popup state ---
   const [cartVisible, setCartVisible] = useState(false);
-  const [placingOrder, setPlacingOrder] = useState(false);
+
+  // --- Order details popup state (opens from the cart's "Place Order" btn) ---
+  const [orderDetailsVisible, setOrderDetailsVisible] = useState(false);
+  const [orderSubmitting, setOrderSubmitting] = useState(false);
 
   // Load auth token once, so it can be attached to image requests below
   useEffect(() => {
@@ -191,11 +197,17 @@ export default function DashboardScreen({
     0
   );
 
-  // Tapping "+ ADD" always opens the options popup — if the item has no
-  // modifiers the modal just shows an empty state and a plain Add to cart.
+  // "Choose Options" only makes sense for rice dishes (fried rice, steam
+  // rice, etc.) which have swappable sides/add-ons. Everything else goes
+  // straight into the cart with no modifiers and no popup in the way.
   function handleAddPress(item: MenuItem) {
-    setModalItem(item);
-    setModalVisible(true);
+    const isRiceItem = item.name.toLowerCase().includes("rice");
+    if (isRiceItem) {
+      setModalItem(item);
+      setModalVisible(true);
+    } else {
+      handleConfirmAddToCart(item, []);
+    }
   }
 
   function handleConfirmAddToCart(
@@ -288,18 +300,51 @@ export default function DashboardScreen({
     setCart([]);
   }
 
-  async function handlePlaceOrder() {
+  // "Place Order" inside the cart popup just opens the Order Details popup —
+  // the actual submission happens from there once order type / customer /
+  // service charge etc. are confirmed.
+  function handlePlaceOrder() {
+    setOrderDetailsVisible(true);
+  }
+
+  function handleCancelOrderDetails() {
+    setOrderDetailsVisible(false);
+  }
+
+  async function handleSubmitOrder(details: OrderDetailsForm) {
     // TODO: wire this up to POST /pos/orders (see the POS API docs) — build
-    // the request body from `cart`, restaurant_id, table_id, steward_id etc.
-    setPlacingOrder(true);
+    // the request body from `cart` + `details` (order_type, customer, room,
+    // steward_id, restaurant_id, service_charge, cart[]...). If
+    // details.finalizeImmediately is true, follow up with
+    // POST /pos/orders/finalize using details.total as paid_amount.
+    setOrderSubmitting(true);
     try {
-      // await createOrder({ ...cart mapped to the API's cart[] shape... })
+      // const response = await createOrder({
+      //   order_id: "new",
+      //   order_type: details.orderType,
+      //   customer: details.customerLabel,
+      //   room: details.roomLabel ?? undefined,
+      //   steward_id: details.stewardId ?? undefined,
+      //   service_charge: details.serviceChargeAmount,
+      //   cart: cart.map((line) => ({
+      //     recipe_id: line.recipe_id,
+      //     name: line.name,
+      //     qty: line.qty,
+      //     price: line.price,
+      //     total: line.total,
+      //     row_id: line.row_id,
+      //     modifiers: line.modifiers,
+      //     note: line.note,
+      //     discount: line.discount,
+      //   })),
+      // });
       setCart([]);
+      setOrderDetailsVisible(false);
       setCartVisible(false);
     } catch (err) {
       console.error("Failed to place order:", err);
     } finally {
-      setPlacingOrder(false);
+      setOrderSubmitting(false);
     }
   }
 
@@ -335,7 +380,14 @@ export default function DashboardScreen({
         onChangeDiscount={handleChangeDiscount}
         onClearCart={handleClearCart}
         onPlaceOrder={handlePlaceOrder}
-        placingOrder={placingOrder}
+      />
+
+      <OrderDetailsPopup
+        visible={orderDetailsVisible}
+        subtotal={cartTotal}
+        onCancel={handleCancelOrderDetails}
+        onSubmit={handleSubmitOrder}
+        submitting={orderSubmitting}
       />
 
       {/* Header */}
