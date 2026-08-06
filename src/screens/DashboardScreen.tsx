@@ -18,8 +18,13 @@ import {
 } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { getMenuCategories, getMenusByCategory, searchMenus } from "../api/menu";
-import { getRunningOrders } from "../api/orders";
-import { MenuCategory, MenuItem } from "../api/types";
+import {
+  getRunningOrders,
+  createOrUpdateOrder,
+  cancelOrder,
+  finalizeOrder,
+} from "../api/orders";
+import { MenuCategory, MenuItem, RunningOrder } from "../api/types";
 import { API_BASE_URL } from "../api/client";
 import SideDrawer from "../components/SideDrawer";
 import AddToCartModal from "../components/AddToCartModal";
@@ -27,9 +32,18 @@ import CartPopup, { CartLine } from "../components/CartPopup";
 import OrderDetailsPopup, {
   OrderDetailsForm,
 } from "../components/OrderDetailsPopup";
+import OrderPlacedModal from "../components/OrderPlacedModal";
+import RunningOrdersPopup from "../components/RunningOrdersPopup";
+import { getStewards, Steward } from "../api/stewards";
+import { getCustomers, Customer } from "../api/customers";
+import { SelectOption } from "../components/OrderDetailsPopup";
 
 // Must match the AsyncStorage key used in api/client.ts's request interceptor
 const AUTH_TOKEN_KEY = "auth_token";
+
+// Required by the POS API but there's no restaurant-selection UI yet —
+// hardcoded for now. Swap this out once the app has a real restaurant picker.
+const DEFAULT_RESTAURANT_ID = 1;
 
 interface DashboardScreenProps {
   userName: string;
@@ -61,9 +75,6 @@ function numericPrice(item: MenuItem): number {
 
 // Handles both full URLs ("https://...") and relative paths ("/uploads/x.jpg")
 // returned by the backend. Relative paths get the API_BASE_URL prepended.
-// 👇 If your backend serves images via a Laravel storage symlink, uncomment
-// the STORAGE_PREFIX line below and test — this is the most common reason
-// for a 404 on an otherwise-correct-looking image path.
 const STORAGE_PREFIX = "/storage"; // set to "" if your backend doesn't need this
 
 function getImageUrl(image?: string | null): string | null {
@@ -106,6 +117,33 @@ export default function DashboardScreen({
   const [orderDetailsVisible, setOrderDetailsVisible] = useState(false);
   const [orderSubmitting, setOrderSubmitting] = useState(false);
 
+  const [stewardOptions, setStewardOptions] = useState<SelectOption[]>([
+    { id: "none", label: "None" },
+  ]);
+
+  // Customer options for the Order Details popup — selecting a real
+  // customer here is what drives the "Room" dropdown's API fetch inside
+  // OrderDetailsPopup (see api/rooms.ts -> getCustomerRooms).
+  const [customerOptions, setCustomerOptions] = useState<SelectOption[]>([
+    { id: "walkin", label: "Walk-in Customer" },
+  ]);
+
+  // --- Order placed confirmation popup state ---
+  const [orderPlacedVisible, setOrderPlacedVisible] = useState(false);
+  const [placedOrder, setPlacedOrder] = useState<{
+    orderId: number | string | null;
+    orderNumber: number | string | null;
+    cart: CartLine[];
+    subtotal: number;
+    serviceCharge: number;
+    total: number;
+  } | null>(null);
+
+  // --- Running orders popup state ---
+  const [runningOrders, setRunningOrders] = useState<RunningOrder[]>([]);
+  const [runningOrdersVisible, setRunningOrdersVisible] = useState(false);
+  const [runningLoading, setRunningLoading] = useState(false);
+
   // Load auth token once, so it can be attached to image requests below
   useEffect(() => {
     AsyncStorage.getItem(AUTH_TOKEN_KEY)
@@ -120,18 +158,57 @@ export default function DashboardScreen({
       .catch((err) => console.error("Failed to load categories:", err));
   }, []);
 
-  // Poll running orders every 5s
+  // Load stewards once, for the "Steward" dropdown in the Order Details popup
   useEffect(() => {
-    const fetchRunning = () => {
-      getRunningOrders()
-        .then((orders) => setRunningCount(orders.length))
-        .catch((err) => console.error("Failed to load running orders:", err));
-    };
-
-    fetchRunning();
-    const interval = setInterval(fetchRunning, 5000);
-    return () => clearInterval(interval);
+    getStewards()
+      .then((stewards: Steward[]) => {
+        const options: SelectOption[] = stewards.map((s) => ({
+          id: s.id,
+          label: s.lname ? `${s.name} ${s.lname}` : s.name,
+        }));
+        setStewardOptions(options);
+      })
+      .catch((err) => console.error("Failed to load stewards:", err));
   }, []);
+
+  // Load customers once, for the "Customer" dropdown in the Order Details
+  // popup. Keeps "Walk-in Customer" as the first option so nothing breaks
+  // if the request fails or returns empty.
+  useEffect(() => {
+    getCustomers()
+      .then((customers: Customer[]) => {
+        const options: SelectOption[] = [
+          { id: "walkin", label: "Walk-in Customer" },
+          ...customers.map((c) => ({
+            id: c.id,
+            label: c.lname ? `${c.name} ${c.lname}` : c.name,
+          })),
+        ];
+        setCustomerOptions(options);
+      })
+      .catch((err) => console.error("Failed to load customers:", err));
+  }, []);
+
+  // Reusable fetch for running orders — used by the 5s poll, the popup's
+  // Refresh button, and right after an order is placed/cancelled/finalized.
+  const fetchRunningOrders = useCallback(async () => {
+    setRunningLoading(true);
+    try {
+      const orders = await getRunningOrders();
+      setRunningOrders(orders);
+      setRunningCount(orders.length);
+    } catch (err) {
+      console.error("Failed to load running orders:", err);
+    } finally {
+      setRunningLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchRunningOrders();
+    const interval = setInterval(fetchRunningOrders, 5000);
+    return () => clearInterval(interval);
+  }, [fetchRunningOrders]);
 
   // Fetch items for the "All" chip by merging every category's items
   const loadAllItems = useCallback(async () => {
@@ -296,6 +373,12 @@ export default function DashboardScreen({
     );
   }
 
+  const handleChangeNote = (id: string, note: string) => {
+    setCart((prev) =>
+      prev.map((line) => (line.id === id ? { ...line, note } : line))
+    );
+  };
+
   function handleClearCart() {
     setCart([]);
   }
@@ -312,40 +395,119 @@ export default function DashboardScreen({
   }
 
   async function handleSubmitOrder(details: OrderDetailsForm) {
-    // TODO: wire this up to POST /pos/orders (see the POS API docs) — build
-    // the request body from `cart` + `details` (order_type, customer, room,
-    // steward_id, restaurant_id, service_charge, cart[]...). If
-    // details.finalizeImmediately is true, follow up with
-    // POST /pos/orders/finalize using details.total as paid_amount.
     setOrderSubmitting(true);
     try {
-      // const response = await createOrder({
-      //   order_id: "new",
-      //   order_type: details.orderType,
-      //   customer: details.customerLabel,
-      //   room: details.roomLabel ?? undefined,
-      //   steward_id: details.stewardId ?? undefined,
-      //   service_charge: details.serviceChargeAmount,
-      //   cart: cart.map((line) => ({
-      //     recipe_id: line.recipe_id,
-      //     name: line.name,
-      //     qty: line.qty,
-      //     price: line.price,
-      //     total: line.total,
-      //     row_id: line.row_id,
-      //     modifiers: line.modifiers,
-      //     note: line.note,
-      //     discount: line.discount,
-      //   })),
-      // });
-      setCart([]);
+      // steward_id is required by the backend — "None" isn't a valid value
+      // there, so fall back to the first real steward if nothing was picked.
+      const fallbackStewardId = stewardOptions.find((s) => s.id !== "none")?.id;
+      const stewardIdToSend =
+        details.stewardId != null ? details.stewardId : fallbackStewardId;
+
+      if (stewardIdToSend == null) {
+        console.error("No steward available to assign to this order.");
+        setOrderSubmitting(false);
+        return;
+      }
+
+      const response = await createOrUpdateOrder({
+        order_id: "new",
+        order_type: details.orderType,
+        customer: String(details.customerId),
+        room: details.roomId != null ? String(details.roomId) : undefined,
+        steward_id: Number(stewardIdToSend),
+        restaurant_id: DEFAULT_RESTAURANT_ID,
+        service_charge: details.serviceChargeAmount,
+        cart: cart.map((line) => ({
+          recipe_id: line.recipe_id,
+          name: line.name,
+          qty: line.qty,
+          price: line.price,
+          total: line.total,
+          row_id: line.row_id,
+          modifiers: line.modifiers,
+          note: line.note,
+          discount: line.discount,
+        })),
+      });
+
+      if (details.finalizeImmediately && response?.data?.order_id) {
+        await finalizeOrder({
+          order_id: response.data.order_id,
+          payment_method: "Cash",
+          paid_amount: details.total,
+          given_amount: details.total,
+          change_amount: 0,
+          order_date: new Date().toISOString(),
+        });
+      }
+
+      setPlacedOrder({
+        orderId: response?.data?.order_id ?? null,
+        orderNumber: response?.data?.order_number ?? null,
+        cart,
+        subtotal: details.subtotal,
+        serviceCharge: details.serviceChargeAmount,
+        total: details.total,
+      });
+
       setOrderDetailsVisible(false);
       setCartVisible(false);
-    } catch (err) {
-      console.error("Failed to place order:", err);
+      setOrderPlacedVisible(true);
+      setCart([]);
+      fetchRunningOrders();
+    } catch (err: any) {
+      console.error(
+        "Failed to place order - validation errors:",
+        JSON.stringify(err.response?.data, null, 2)
+      );
     } finally {
       setOrderSubmitting(false);
     }
+  }
+
+  function handleOrderPlacedDone() {
+    setOrderPlacedVisible(false);
+    setPlacedOrder(null);
+  }
+
+  async function handleCancelRunningOrder(order: RunningOrder) {
+    try {
+      await cancelOrder({ order_id: order.id, reason: "Cancelled from POS" });
+      fetchRunningOrders();
+    } catch (err) {
+      console.error("Failed to cancel order:", err);
+    }
+  }
+
+  async function handleFinalizeRunningOrder(order: RunningOrder) {
+    const raw = (order as any).total ?? (order as any).grand_total ?? 0;
+    const total = typeof raw === "string" ? parseFloat(raw) : raw;
+    const safeAmount = Number.isFinite(total) ? total : 0;
+
+    try {
+      await finalizeOrder({
+        order_id: order.id,
+        payment_method: "Cash",
+        paid_amount: safeAmount,
+        given_amount: safeAmount,
+        change_amount: 0,
+        order_date: new Date().toISOString(),
+      });
+      fetchRunningOrders();
+    } catch (err: any) {
+      console.error(
+        "Failed to finalize order - validation errors:",
+        JSON.stringify(err.response?.data, null, 2)
+      );
+    }
+  }
+
+  // TODO: hook these up to a dedicated screen/modal once that flow is built
+  function handleUpdateRunningOrder(order: RunningOrder) {
+    console.log("Update order", order.id);
+  }
+  function handleSplitRunningOrder(order: RunningOrder) {
+    console.log("Split payment for order", order.id);
   }
 
   return (
@@ -378,6 +540,7 @@ export default function DashboardScreen({
         onDecrement={handleDecrementLine}
         onRemove={handleRemoveLine}
         onChangeDiscount={handleChangeDiscount}
+        onChangeNote={handleChangeNote}
         onClearCart={handleClearCart}
         onPlaceOrder={handlePlaceOrder}
       />
@@ -388,6 +551,31 @@ export default function DashboardScreen({
         onCancel={handleCancelOrderDetails}
         onSubmit={handleSubmitOrder}
         submitting={orderSubmitting}
+        customers={customerOptions}
+        stewards={stewardOptions}
+      />
+
+      <OrderPlacedModal
+        visible={orderPlacedVisible}
+        orderId={placedOrder?.orderId ?? null}
+        orderNumber={placedOrder?.orderNumber ?? null}
+        cart={placedOrder?.cart ?? []}
+        subtotal={placedOrder?.subtotal ?? 0}
+        serviceCharge={placedOrder?.serviceCharge ?? 0}
+        total={placedOrder?.total ?? 0}
+        onDone={handleOrderPlacedDone}
+      />
+
+      <RunningOrdersPopup
+        visible={runningOrdersVisible}
+        orders={runningOrders}
+        loading={runningLoading}
+        onClose={() => setRunningOrdersVisible(false)}
+        onRefresh={fetchRunningOrders}
+        onCancel={handleCancelRunningOrder}
+        onUpdate={handleUpdateRunningOrder}
+        onFinalize={handleFinalizeRunningOrder}
+        onSplit={handleSplitRunningOrder}
       />
 
       {/* Header */}
@@ -417,7 +605,10 @@ export default function DashboardScreen({
           value={search}
           onChangeText={setSearch}
         />
-        <TouchableOpacity style={styles.runningBadge}>
+        <TouchableOpacity
+          style={styles.runningBadge}
+          onPress={() => setRunningOrdersVisible(true)}
+        >
           <Text style={styles.runningBadgeText}>Running</Text>
           <View style={styles.runningCountCircle}>
             <Text style={styles.runningCountText}>{runningCount}</Text>

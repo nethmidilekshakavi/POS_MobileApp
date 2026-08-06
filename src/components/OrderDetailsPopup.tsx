@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   View,
   Text,
@@ -8,7 +8,9 @@ import {
   Pressable,
   Switch,
   ScrollView,
+  ActivityIndicator,
 } from "react-native";
+import { getCustomerRooms } from "../api/rooms";
 
 export interface SelectOption {
   id: number | string;
@@ -38,6 +40,8 @@ interface OrderDetailsPopupProps {
   onSubmit: (form: OrderDetailsForm) => void;
   submitting?: boolean;
   customers?: SelectOption[];
+  // Optional static fallback list — used only until the API call resolves,
+  // or if apiBaseUrl/authToken aren't supplied.
   rooms?: SelectOption[];
   stewards?: SelectOption[];
   serviceChargePercent?: number;
@@ -57,6 +61,7 @@ function SelectField({
   options,
   onChange,
   disabled,
+  loading,
 }: {
   label: string;
   value: string | null;
@@ -64,6 +69,7 @@ function SelectField({
   options: SelectOption[];
   onChange: (option: SelectOption) => void;
   disabled?: boolean;
+  loading?: boolean;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -84,7 +90,11 @@ function SelectField({
         >
           {value ?? placeholder}
         </Text>
-        <Text style={styles.selectChevron}>▾</Text>
+        {loading ? (
+          <ActivityIndicator size="small" color="#f4695f" />
+        ) : (
+          <Text style={styles.selectChevron}>▾</Text>
+        )}
       </TouchableOpacity>
 
       <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
@@ -92,18 +102,22 @@ function SelectField({
           <Pressable style={styles.selectSheet} onPress={() => {}}>
             <Text style={styles.selectSheetTitle}>{label}</Text>
             <ScrollView style={{ maxHeight: 320 }}>
-              {options.map((option) => (
-                <TouchableOpacity
-                  key={option.id}
-                  style={styles.selectOptionRow}
-                  onPress={() => {
-                    onChange(option);
-                    setOpen(false);
-                  }}
-                >
-                  <Text style={styles.selectOptionText}>{option.label}</Text>
-                </TouchableOpacity>
-              ))}
+              {options.length === 0 ? (
+                <Text style={styles.selectEmptyText}>No options available</Text>
+              ) : (
+                options.map((option) => (
+                  <TouchableOpacity
+                    key={option.id}
+                    style={styles.selectOptionRow}
+                    onPress={() => {
+                      onChange(option);
+                      setOpen(false);
+                    }}
+                  >
+                    <Text style={styles.selectOptionText}>{option.label}</Text>
+                  </TouchableOpacity>
+                ))
+              )}
             </ScrollView>
           </Pressable>
         </Pressable>
@@ -119,7 +133,7 @@ export default function OrderDetailsPopup({
   onSubmit,
   submitting = false,
   customers = DEFAULT_CUSTOMERS,
-  rooms = [],
+  rooms: roomsFallback = [],
   stewards = DEFAULT_STEWARDS,
   serviceChargePercent = 10,
 }: OrderDetailsPopupProps) {
@@ -132,7 +146,95 @@ export default function OrderDetailsPopup({
   const [serviceChargeEnabled, setServiceChargeEnabled] = useState(true);
   const [finalizeImmediately, setFinalizeImmediately] = useState(false);
 
+  // Rooms loaded from the API for whichever customer is currently selected.
+  const [rooms, setRooms] = useState<SelectOption[]>(roomsFallback);
+  const [roomsLoading, setRoomsLoading] = useState(false);
+  const [roomsError, setRoomsError] = useState<string | null>(null);
+
+  // `stewards` (and `customers`) load asynchronously from the API and often
+  // arrive AFTER this component has already mounted with the default
+  // placeholder list. useState(stewards[0]) only captures the value at
+  // mount time, so without this effect the dropdown would show the real
+  // options but the selected value would stay stuck on "None". Re-sync
+  // the selection whenever the options list actually changes.
+  useEffect(() => {
+    if (stewards.length > 0) {
+      setSteward(stewards[0]);
+    }
+  }, [stewards]);
+
+  useEffect(() => {
+    if (customers.length > 0) {
+      setCustomer(customers[0]);
+    }
+  }, [customers]);
+
+  // Reset the form back to defaults every time the popup is (re)opened,
+  // so a previous order's selections don't linger into the next one.
+  useEffect(() => {
+    if (visible) {
+      setOrderType("Dine In");
+      setCustomer(customers[0]);
+      setRoom(null);
+      setSteward(stewards[0]);
+      setServiceChargeEnabled(true);
+      setFinalizeImmediately(false);
+      setRooms(roomsFallback);
+      setRoomsError(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible]);
+
   const isWalkIn = customer.id === "walkin" || customer.id === "none";
+
+  // Fetch rooms for the selected customer via POST /api/pos/customer_rooms
+  // (see routes/api.php — Api\HotelController@get_customer_rooms, and
+  // api/rooms.ts — getCustomerRooms).
+  useEffect(() => {
+    if (!visible || isWalkIn || !customer.id) {
+      setRooms(roomsFallback);
+      return;
+    }
+
+    let cancelled = false;
+
+    async function fetchRooms() {
+      setRoomsLoading(true);
+      setRoomsError(null);
+      setRoom(null); // reset previously selected room when customer changes
+      try {
+        const list = await getCustomerRooms(customer.id);
+        // Adjust this mapping if your API uses different field names.
+        const mapped: SelectOption[] = (list ?? []).map((r: any) => ({
+          id: r.id ?? r.room_id,
+          label: r.room_no ?? r.name ?? r.label ?? `Room ${r.id ?? r.room_id}`,
+        }));
+
+        if (!cancelled) {
+          setRooms(mapped);
+        }
+      } catch (err: any) {
+        console.error("Failed to load rooms:", err);
+        if (!cancelled) {
+          setRoomsError(
+            err?.response?.data?.message ?? "Failed to load rooms"
+          );
+          setRooms([]);
+        }
+      } finally {
+        if (!cancelled) {
+          setRoomsLoading(false);
+        }
+      }
+    }
+
+    fetchRooms();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customer.id, visible, isWalkIn]);
 
   const serviceChargeAmount = useMemo(
     () => (serviceChargeEnabled ? subtotal * (serviceChargePercent / 100) : 0),
@@ -228,12 +330,20 @@ export default function OrderDetailsPopup({
                 label="Room"
                 value={room?.label ?? null}
                 placeholder={
-                  isWalkIn ? "Select customer first" : "Select room"
+                  isWalkIn
+                    ? "Select customer first"
+                    : roomsLoading
+                    ? "Loading rooms..."
+                    : "Select room"
                 }
                 options={rooms}
-                disabled={isWalkIn || rooms.length === 0}
+                disabled={isWalkIn || roomsLoading || rooms.length === 0}
+                loading={roomsLoading}
                 onChange={setRoom}
               />
+              {roomsError && (
+                <Text style={styles.roomsErrorText}>{roomsError}</Text>
+              )}
 
               <SelectField
                 label="Steward"
@@ -455,6 +565,19 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: "#1a1a2e",
     fontWeight: "600",
+  },
+  selectEmptyText: {
+    textAlign: "center",
+    color: "#9ca3af",
+    paddingVertical: 20,
+    fontSize: 14,
+  },
+  roomsErrorText: {
+    color: "#f4695f",
+    fontSize: 12,
+    fontWeight: "600",
+    marginTop: -10,
+    marginBottom: 12,
   },
   toggleRow: {
     flexDirection: "row",

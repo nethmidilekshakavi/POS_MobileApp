@@ -1,14 +1,18 @@
+
+
+
 import apiClient from "./client";
-import { Customer } from "./types";
+
+// Field names are a best guess based on get_stewards' shape — check a real
+// response from GET /api/pos/customers and adjust if needed.
+export interface Customer {
+  id: number | string;
+  name: string;
+  lname?: string;
+  [key: string]: any;
+}
 
 export const getCustomers = async (): Promise<Customer[]> => {
-  const response = await apiClient.get("/pos/customers");
-  return response.data.customers;
-};
-
-export const getCustomerRooms = async (reservation_id: number) => {
-  const response = await apiClient.post("/pos/customer_rooms", {
-    reservation_id,
-  });
-  return response.data;
+  const response = await apiClient.get("api/pos/customers");
+  return response.data.customers ?? response.data.data ?? response.data;
 };

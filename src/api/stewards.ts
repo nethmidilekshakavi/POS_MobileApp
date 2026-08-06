@@ -1,10 +1,11 @@
 import apiClient from "./client";
-import { Table, Steward } from "./types";
 
-export const getTables = async (): Promise<Table[]> => {
-  const response = await apiClient.get("api/pos/tables");
-  return response.data.tables;
-};
+export interface Steward {
+  id: number;
+  name: string;
+  lname?: string;
+  role?: string;
+}
 
 export const getStewards = async (): Promise<Steward[]> => {
   const response = await apiClient.get("api/pos/stewards");

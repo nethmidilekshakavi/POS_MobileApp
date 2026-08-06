@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import {
   View,
   Text,
@@ -33,6 +33,7 @@ interface CartPopupProps {
   onDecrement: (id: string) => void;
   onRemove: (id: string) => void;
   onChangeDiscount: (id: string, discount: number) => void;
+  onChangeNote: (id: string, note: string) => void;
   onClearCart: () => void;
   onPlaceOrder: () => void;
   placingOrder?: boolean;
@@ -46,16 +47,24 @@ export default function CartPopup({
   onDecrement,
   onRemove,
   onChangeDiscount,
+  onChangeNote,
   onClearCart,
   onPlaceOrder,
   placingOrder = false,
 }: CartPopupProps) {
+  // Tracks which line's note editor is currently open (client-side `id`)
+  const [openNoteId, setOpenNoteId] = useState<string | null>(null);
+
   const itemCount = cart.reduce((sum, line) => sum + line.qty, 0);
   const cartTotal = cart.reduce(
     (sum, line) => sum + Math.max(line.total - line.discount, 0),
     0
   );
   const isEmpty = cart.length === 0;
+
+  const toggleNote = (id: string) => {
+    setOpenNoteId((prev) => (prev === id ? null : id));
+  };
 
   return (
     <Modal
@@ -98,12 +107,37 @@ export default function CartPopup({
               >
                 {cart.map((line) => {
                   const lineTotal = Math.max(line.total - line.discount, 0);
+                  const isNoteOpen = openNoteId === line.id;
+                  const hasNote = !!line.note && line.note.trim().length > 0;
+
                   return (
                     <View key={line.id} style={styles.itemCard}>
-                      <Text style={styles.itemName}>{line.name}</Text>
-                      <Text style={styles.itemBasePrice}>
-                        Rs {line.price.toFixed(2)}
-                      </Text>
+                      <View style={styles.itemHeaderRow}>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.itemName}>{line.name}</Text>
+                          <Text style={styles.itemBasePrice}>
+                            Rs {line.price.toFixed(2)}
+                          </Text>
+                        </View>
+
+                        {/* Note toggle button — mirrors the "+ Note" icon on the web POS */}
+                        <TouchableOpacity
+                          style={[
+                            styles.noteToggleBtn,
+                            hasNote && styles.noteToggleBtnActive,
+                          ]}
+                          onPress={() => toggleNote(line.id)}
+                        >
+                          <Text
+                            style={[
+                              styles.noteToggleBtnText,
+                              hasNote && styles.noteToggleBtnTextActive,
+                            ]}
+                          >
+                            {hasNote ? "📝 Note" : "+ Note"}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
 
                       {line.modifiers.length > 0 && (
                         <View style={styles.modifierList}>
@@ -115,6 +149,23 @@ export default function CartPopup({
                               + {mod.name} • Rs 0.00
                             </Text>
                           ))}
+                        </View>
+                      )}
+
+                      {/* Note editor — shown when the note icon is tapped, or
+                          whenever a note already exists so it's visible at a glance */}
+                      {(isNoteOpen || hasNote) && (
+                        <View style={styles.noteBox}>
+                          <Text style={styles.noteLabel}>Note</Text>
+                          <TextInput
+                            style={styles.noteInput}
+                            placeholder="Add a note for this item..."
+                            placeholderTextColor="#9ca3af"
+                            multiline
+                            value={line.note ?? ""}
+                            onChangeText={(text) => onChangeNote(line.id, text)}
+                            autoFocus={isNoteOpen && !hasNote}
+                          />
                         </View>
                       )}
 
@@ -279,6 +330,11 @@ const styles = StyleSheet.create({
     marginBottom: 14,
     backgroundColor: "#fcfcfd",
   },
+  itemHeaderRow: {
+    flexDirection: "row",
+    alignItems: "flex-start",
+    justifyContent: "space-between",
+  },
   itemName: {
     fontSize: 16,
     fontWeight: "800",
@@ -290,6 +346,50 @@ const styles = StyleSheet.create({
     color: "#6b7280",
     marginBottom: 10,
     fontWeight: "600",
+  },
+  noteToggleBtn: {
+    height: 32,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: "#e5e7eb",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#ffffff",
+    marginLeft: 8,
+    paddingHorizontal: 10,
+  },
+  noteToggleBtnActive: {
+    borderColor: "#f4695f",
+    backgroundColor: "#fdeceb",
+  },
+  noteToggleBtnText: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "#6b7280",
+  },
+  noteToggleBtnTextActive: {
+    color: "#f4695f",
+  },
+  noteBox: {
+    marginBottom: 12,
+  },
+  noteLabel: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "#4b5563",
+    marginBottom: 6,
+  },
+  noteInput: {
+    borderWidth: 1,
+    borderColor: "#e5e7eb",
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    fontSize: 14,
+    color: "#1a1a2e",
+    backgroundColor: "#ffffff",
+    minHeight: 44,
+    textAlignVertical: "top",
   },
   modifierList: {
     marginBottom: 12,
