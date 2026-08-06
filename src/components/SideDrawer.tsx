@@ -12,7 +12,9 @@ interface SideDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   userName: string;
-  onNavigate: (page: "dashboard" | "history") => void;
+  onNavigate: (
+    page: "dashboard" | "history" | "restaurant-dashboard" | "restaurant-orders"
+  ) => void;
   onLogout: () => void;
 }
 
@@ -67,6 +69,84 @@ export default function SideDrawer({
                   <Text style={{ fontSize: 18 }}>📋</Text>
                 </View>
                 <Text style={styles.drawerItemText}>History</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.drawerItem}
+                onPress={() => {
+                  onNavigate("restaurant-orders");
+                  onClose();
+                }}
+              >
+                <View style={styles.drawerItemIcon}>
+                  <Text style={{ fontSize: 18 }}>🍽️</Text>
+                </View>
+                <Text style={styles.drawerItemText}>Restaurant Orders</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.drawerItem}
+                onPress={() => {
+                  onNavigate("dashboard");
+                  onClose();
+                }}
+              >
+                <View style={styles.drawerItemIcon}>
+                  <Text style={{ fontSize: 18 }}>🧾</Text>
+                </View>
+                <Text style={styles.drawerItemText}>KOT</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.drawerItem}
+                onPress={() => {
+                  onNavigate("dashboard");
+                  onClose();
+                }}
+              >
+                <View style={styles.drawerItemIcon}>
+                  <Text style={{ fontSize: 18 }}>📖</Text>
+                </View>
+                <Text style={styles.drawerItemText}>Recipes (BOM)</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.drawerItem}
+                onPress={() => {
+                  onNavigate("dashboard");
+                  onClose();
+                }}
+              >
+                <View style={styles.drawerItemIcon}>
+                  <Text style={{ fontSize: 18 }}>🍔</Text>
+                </View>
+                <Text style={styles.drawerItemText}>Menu Items</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.drawerItem}
+                onPress={() => {
+                  onNavigate("dashboard");
+                  onClose();
+                }}
+              >
+                <View style={styles.drawerItemIcon}>
+                  <Text style={{ fontSize: 18 }}>📱</Text>
+                </View>
+                <Text style={styles.drawerItemText}>QR Table Orders</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.drawerItem}
+                onPress={() => {
+                  onNavigate("dashboard");
+                  onClose();
+                }}
+              >
+                <View style={styles.drawerItemIcon}>
+                  <Text style={{ fontSize: 18 }}>🔐</Text>
+                </View>
+                <Text style={styles.drawerItemText}>POS Terminal Access</Text>
               </TouchableOpacity>
 
               <View style={styles.divider} />

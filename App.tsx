@@ -3,10 +3,18 @@ import { StatusBar } from "expo-status-bar";
 import LoginScreen from "./src/screens/LoginScreen";
 import DashboardScreen from "./src/screens/DashboardScreen";
 import LoadingScreen from "./src/screens/LoadingScreen";
+import RestaurantDashboardScreen from "./src/screens/RestaurantDashboardScreen";
+import RestaurantOrdersScreen from "./src/screens/RestaurantOrdersScreen";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
-type Page = "loading" | "login" | "dashboard" | "history";
+type Page =
+  | "loading"
+  | "login"
+  | "dashboard"
+  | "history"
+  | "restaurant-dashboard"
+  | "restaurant-orders";
 
 // Must match the keys used elsewhere (e.g. DashboardScreen's image auth
 // headers, api/client.ts's request interceptor).
@@ -71,15 +79,21 @@ export default function App() {
         <DashboardScreen
           userName={userName}
           onLogout={handleLogout}
-          onNavigate={(page) => setCurrentPage(page)}
+          onNavigate={(page) => setCurrentPage(page as Page)}
         />
       )}
       {currentPage === "history" && (
         <DashboardScreen
           userName={userName}
           onLogout={handleLogout}
-          onNavigate={(page) => setCurrentPage(page)}
+          onNavigate={(page) => setCurrentPage(page as Page)}
         />
+      )}
+      {currentPage === "restaurant-dashboard" && (
+        <RestaurantDashboardScreen onBack={() => setCurrentPage("dashboard")} />
+      )}
+      {currentPage === "restaurant-orders" && (
+        <RestaurantOrdersScreen onBack={() => setCurrentPage("dashboard")} />
       )}
     </SafeAreaProvider>
   );

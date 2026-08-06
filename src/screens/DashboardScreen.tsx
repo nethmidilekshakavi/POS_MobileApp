@@ -48,7 +48,9 @@ const DEFAULT_RESTAURANT_ID = 1;
 interface DashboardScreenProps {
   userName: string;
   onLogout: () => void;
-  onNavigate: (page: "dashboard" | "history" | "cart") => void;
+  onNavigate: (
+    page: "dashboard" | "history" | "cart" | "restaurant-dashboard"
+  ) => void;
 }
 
 // Client-side unique id for a cart line — separate from `row_id`, which is
