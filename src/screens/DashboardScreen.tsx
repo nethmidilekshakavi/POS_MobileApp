@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   View,
   Text,
@@ -6,772 +6,507 @@ import {
   TouchableOpacity,
   StyleSheet,
   FlatList,
-  ScrollView,
   ActivityIndicator,
-  Image,
+  Modal,
   Platform,
-  StatusBar,
 } from "react-native";
-import {
-  SafeAreaView,
-  useSafeAreaInsets,
-} from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { getMenuCategories, getMenusByCategory, searchMenus } from "../api/menu";
-import {
-  getRunningOrders,
-  createOrUpdateOrder,
-  cancelOrder,
-  finalizeOrder,
-} from "../api/orders";
-import { MenuCategory, MenuItem, RunningOrder } from "../api/types";
-import { API_BASE_URL } from "../api/client";
+import DateTimePicker, {
+  DateTimePickerEvent,
+} from "@react-native-community/datetimepicker";
 import SideDrawer from "../components/SideDrawer";
-import AddToCartModal from "../components/AddToCartModal";
-import CartPopup, { CartLine } from "../components/CartPopup";
-import OrderDetailsPopup, {
-  OrderDetailsForm,
-} from "../components/OrderDetailsPopup";
-import OrderPlacedModal from "../components/OrderPlacedModal";
-import RunningOrdersPopup from "../components/RunningOrdersPopup";
-import { getStewards, Steward } from "../api/stewards";
-import { getCustomers, Customer } from "../api/customers";
-import { SelectOption } from "../components/OrderDetailsPopup";
 
-// Must match the AsyncStorage key used in api/client.ts's request interceptor
 const AUTH_TOKEN_KEY = "auth_token";
+const API_BASE_URL = "https://demo.trackerstay.com";
 
-// Required by the POS API but there's no restaurant-selection UI yet —
-// hardcoded for now. Swap this out once the app has a real restaurant picker.
-const DEFAULT_RESTAURANT_ID = 1;
+type NavPage = "dashboard" | "history" | "restaurant-dashboard" | "restaurant-orders";
 
-interface DashboardScreenProps {
+interface RestaurantDashboardScreenProps {
+  // This screen is the app's home/landing page, so — like DashboardScreen —
+  // it opens the shared SideDrawer instead of having its own back arrow.
   userName: string;
   onLogout: () => void;
-  onNavigate: (
-    page: "dashboard" | "history" | "cart" | "restaurant-dashboard"
-  ) => void;
+  onNavigate: (page: NavPage) => void;
+  // Optional: wire this up to your mail/report flow later
+  onSendMail?: () => void;
 }
 
-// Client-side unique id for a cart line — separate from `row_id`, which is
-// the API's "new" / existing-detail-id concept used by POST /pos/orders.
-function makeLineId(): string {
-  return `line_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+interface SaleItemRow {
+  id?: number | string;
+  item_name?: string;
+  name?: string;
+  price?: number | string;
+  quantity?: number | string;
+  qty?: number | string;
+  amount?: number | string;
+  total?: number | string;
+  paid_status?: string;
+  status?: string;
 }
 
-// API sometimes returns prices as strings ("850.00") instead of numbers.
-// This safely coerces whatever we get into a formatted "0.00" string.
-function formatPrice(item: MenuItem): string {
-  const raw =
-    item.final_price ?? item.original_price ?? (item as any).price ?? 0;
-  const value = typeof raw === "string" ? parseFloat(raw) : raw;
-  return Number.isFinite(value) ? value.toFixed(2) : "0.00";
+interface SalesSummaryResponse {
+  // The POS API doc doesn't document this endpoint's exact shape, so this
+  // type (and the pick* helpers below) are written defensively — they try
+  // several likely field names instead of assuming one. Tighten this once
+  // you confirm the real response from /api/v1/pos/sales.
+  success?: boolean;
+  today?: Record<string, any>;
+  monthly?: Record<string, any>;
+  today_total_sale?: number | string;
+  today_total_cost?: number | string;
+  today_total_income?: number | string;
+  monthly_total_sale?: number | string;
+  monthly_total_cost?: number | string;
+  monthly_total_income?: number | string;
+  items?: SaleItemRow[];
+  data?: SaleItemRow[];
+  current_page?: number;
+  last_page?: number;
+  total?: number;
 }
 
-function numericPrice(item: MenuItem): number {
-  const raw =
-    item.final_price ?? item.original_price ?? (item as any).price ?? 0;
-  const value = typeof raw === "string" ? parseFloat(raw) : raw;
-  return Number.isFinite(value) ? (value as number) : 0;
+// Shared palette — kept in sync with RestaurantOrdersScreen.tsx
+const COLORS = {
+  primary: "#f4695f",
+  primaryLight: "#fdece9",
+  teal: "#10b981",
+  tealLight: "#d1fae5",
+  dark: "#1a1a2e",
+  gray: "#6b7280",
+  grayLight: "#9ca3af",
+  border: "#e5e7eb",
+  borderLight: "#f0f0f0",
+  bg: "#ffffff",
+  cardBg: "#fcfcfd",
+  green: "#22c55e",
+  greenLight: "#dcfce7",
+  amber: "#f59e0b",
+  amberLight: "#fef3c7",
+  red: "#ef4444",
+  redLight: "#fee2e2",
+  grayPillBg: "#f3f4f6",
+};
+
+function money(value: number | string | undefined): string {
+  const n = typeof value === "string" ? parseFloat(value) : value ?? 0;
+  return Number.isFinite(n) ? (n as number).toFixed(0) : "0";
 }
 
-// Handles both full URLs ("https://...") and relative paths ("/uploads/x.jpg")
-// returned by the backend. Relative paths get the API_BASE_URL prepended.
-const STORAGE_PREFIX = "/storage"; // set to "" if your backend doesn't need this
-
-function getImageUrl(image?: string | null): string | null {
-  if (!image) return null;
-  if (image.startsWith("http://") || image.startsWith("https://")) {
-    return image;
+// Tries several possible key names for a stat, since the exact response
+// shape from the sales endpoint isn't documented yet.
+function pick(obj: Record<string, any> | undefined, keys: string[]): number {
+  if (!obj) return 0;
+  for (const k of keys) {
+    if (obj[k] !== undefined && obj[k] !== null) {
+      const v = obj[k];
+      const n = typeof v === "string" ? parseFloat(v) : v;
+      if (Number.isFinite(n)) return n as number;
+    }
   }
-  const path = image.startsWith("/") ? image : `/${image}`;
-  return `${API_BASE_URL}${STORAGE_PREFIX}${path}`;
+  return 0;
 }
 
-export default function DashboardScreen({
+function todayISO(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function shiftDate(iso: string, days: number): string {
+  const d = new Date(iso + "T00:00:00");
+  if (Number.isNaN(d.getTime())) return todayISO();
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function isValidISODate(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) && !Number.isNaN(new Date(value).getTime());
+}
+
+// --- ISO string <-> JS Date helpers for the native calendar picker ---
+function isoToDate(iso: string): Date {
+  const d = new Date(iso + "T00:00:00");
+  return Number.isNaN(d.getTime()) ? new Date() : d;
+}
+
+function dateToISO(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function paidStatusStyle(status: string): { color: string; bg: string } {
+  const s = status.toLowerCase();
+  if (s.includes("paid") && !s.includes("un")) return { color: COLORS.green, bg: COLORS.greenLight };
+  if (s.includes("unpaid") || s.includes("pending")) return { color: COLORS.amber, bg: COLORS.amberLight };
+  return { color: COLORS.gray, bg: COLORS.grayPillBg };
+}
+
+export default function RestaurantDashboardScreen({
   userName,
   onLogout,
   onNavigate,
-}: DashboardScreenProps) {
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [categories, setCategories] = useState<MenuCategory[]>([]);
-  const [selectedCategory, setSelectedCategory] = useState<number | "all">(
-    "all"
-  );
-  const [menuItems, setMenuItems] = useState<MenuItem[]>([]);
-  const [search, setSearch] = useState("");
-  const [searchResults, setSearchResults] = useState<MenuItem[]>([]);
-  const [runningCount, setRunningCount] = useState(0);
-  const [loading, setLoading] = useState(false);
-  const [searching, setSearching] = useState(false);
-  const [authToken, setAuthToken] = useState<string | null>(null);
+  onSendMail,
+}: RestaurantDashboardScreenProps) {
   const insets = useSafeAreaInsets();
+  const [drawerOpen, setDrawerOpen] = useState(false);
 
-  // --- Add-to-cart popup state ---
-  const [modalItem, setModalItem] = useState<MenuItem | null>(null);
-  const [modalVisible, setModalVisible] = useState(false);
-  const [cart, setCart] = useState<CartLine[]>([]);
+  const [selectedDate, setSelectedDate] = useState(todayISO());
+  const [dateDraft, setDateDraft] = useState(todayISO());
 
-  // --- Cart popup state ---
-  const [cartVisible, setCartVisible] = useState(false);
+  // --- Calendar picker state ---
+  // On Android the native picker is a one-shot dialog (opens, pick, closes
+  // automatically). On iOS it's an inline spinner/calendar that needs to
+  // live inside our own Modal with a "Done" button, since there's no native
+  // dismiss button for it.
+  const [pickerVisible, setPickerVisible] = useState(false);
+  const [tempPickerDate, setTempPickerDate] = useState<Date>(isoToDate(todayISO()));
 
-  // --- Order details popup state (opens from the cart's "Place Order" btn) ---
-  const [orderDetailsVisible, setOrderDetailsVisible] = useState(false);
-  const [orderSubmitting, setOrderSubmitting] = useState(false);
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [page, setPage] = useState(1);
 
-  const [stewardOptions, setStewardOptions] = useState<SelectOption[]>([
-    { id: "none", label: "None" },
-  ]);
+  const [rows, setRows] = useState<SaleItemRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [lastPage, setLastPage] = useState(1);
 
-  // Customer options for the Order Details popup — selecting a real
-  // customer here is what drives the "Room" dropdown's API fetch inside
-  // OrderDetailsPopup (see api/rooms.ts -> getCustomerRooms).
-  const [customerOptions, setCustomerOptions] = useState<SelectOption[]>([
-    { id: "walkin", label: "Walk-in Customer" },
-  ]);
+  const [todayStats, setTodayStats] = useState({ sale: 0, cost: 0, income: 0 });
+  const [monthlyStats, setMonthlyStats] = useState({ sale: 0, cost: 0, income: 0 });
 
-  // --- Order placed confirmation popup state ---
-  const [orderPlacedVisible, setOrderPlacedVisible] = useState(false);
-  const [placedOrder, setPlacedOrder] = useState<{
-    orderId: number | string | null;
-    orderNumber: number | string | null;
-    cart: CartLine[];
-    subtotal: number;
-    serviceCharge: number;
-    total: number;
-  } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  // --- Running orders popup state ---
-  const [runningOrders, setRunningOrders] = useState<RunningOrder[]>([]);
-  const [runningOrdersVisible, setRunningOrdersVisible] = useState(false);
-  const [runningLoading, setRunningLoading] = useState(false);
-
-  // Load auth token once, so it can be attached to image requests below
+  // Debounce search input so we don't fire a request per keystroke
   useEffect(() => {
-    AsyncStorage.getItem(AUTH_TOKEN_KEY)
-      .then(setAuthToken)
-      .catch((err) => console.error("Failed to load auth token:", err));
-  }, []);
+    const t = setTimeout(() => {
+      setDebouncedSearch(search.trim());
+      setPage(1);
+    }, 400);
+    return () => clearTimeout(t);
+  }, [search]);
 
-  // Load categories once
-  useEffect(() => {
-    getMenuCategories()
-      .then(setCategories)
-      .catch((err) => console.error("Failed to load categories:", err));
-  }, []);
-
-  // Load stewards once, for the "Steward" dropdown in the Order Details popup
-  useEffect(() => {
-    getStewards()
-      .then((stewards: Steward[]) => {
-        const options: SelectOption[] = stewards.map((s) => ({
-          id: s.id,
-          label: s.lname ? `${s.name} ${s.lname}` : s.name,
-        }));
-        setStewardOptions(options);
-      })
-      .catch((err) => console.error("Failed to load stewards:", err));
-  }, []);
-
-  // Load customers once, for the "Customer" dropdown in the Order Details
-  // popup. Keeps "Walk-in Customer" as the first option so nothing breaks
-  // if the request fails or returns empty.
-  useEffect(() => {
-    getCustomers()
-      .then((customers: Customer[]) => {
-        const options: SelectOption[] = [
-          { id: "walkin", label: "Walk-in Customer" },
-          ...customers.map((c) => ({
-            id: c.id,
-            label: c.lname ? `${c.name} ${c.lname}` : c.name,
-          })),
-        ];
-        setCustomerOptions(options);
-      })
-      .catch((err) => console.error("Failed to load customers:", err));
-  }, []);
-
-  // Reusable fetch for running orders — used by the 5s poll, the popup's
-  // Refresh button, and right after an order is placed/cancelled/finalized.
-  const fetchRunningOrders = useCallback(async () => {
-    setRunningLoading(true);
-    try {
-      const orders = await getRunningOrders();
-      setRunningOrders(orders);
-      setRunningCount(orders.length);
-    } catch (err) {
-      console.error("Failed to load running orders:", err);
-    } finally {
-      setRunningLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    fetchRunningOrders();
-    const interval = setInterval(fetchRunningOrders, 5000);
-    return () => clearInterval(interval);
-  }, [fetchRunningOrders]);
-
-  // Fetch items for the "All" chip by merging every category's items
-  const loadAllItems = useCallback(async () => {
-    if (categories.length === 0) return;
+  const fetchDashboard = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
-      const results = await Promise.all(
-        categories.map((cat) => getMenusByCategory(cat.id).catch(() => []))
-      );
-      const merged = results.flat();
-      // de-dupe by id just in case an item appears in multiple categories
-      const unique = Array.from(
-        new Map(merged.map((item) => [item.id, item])).values()
-      );
-      setMenuItems(unique);
-    } catch (err) {
-      console.error("Failed to load all menu items:", err);
+      const token = await AsyncStorage.getItem(AUTH_TOKEN_KEY);
+      const params = new URLSearchParams({
+        date: selectedDate,
+        // Endpoint name (SelcteddaterangePOsSale) hints at a from/to range —
+        // sending the same day for both covers that possibility too.
+        from_date: selectedDate,
+        to_date: selectedDate,
+        per_page: "10",
+        page: String(page),
+      });
+      if (debouncedSearch) params.set("search", debouncedSearch);
+
+      const res = await fetch(`${API_BASE_URL}/api/v1/pos/sales?${params.toString()}`, {
+        headers: {
+          Accept: "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+      if (!res.ok) throw new Error(`Request failed (${res.status})`);
+      const json: SalesSummaryResponse = await res.json();
+
+      setTodayStats({
+        sale: pick(json.today, ["total_sale", "sale"]) || pick(json, ["today_total_sale"]),
+        cost: pick(json.today, ["total_cost", "cost"]) || pick(json, ["today_total_cost"]),
+        income: pick(json.today, ["total_income", "income"]) || pick(json, ["today_total_income"]),
+      });
+      setMonthlyStats({
+        sale: pick(json.monthly, ["total_sale", "sale"]) || pick(json, ["monthly_total_sale"]),
+        cost: pick(json.monthly, ["total_cost", "cost"]) || pick(json, ["monthly_total_cost"]),
+        income: pick(json.monthly, ["total_income", "income"]) || pick(json, ["monthly_total_income"]),
+      });
+
+      const list = json.items ?? json.data ?? [];
+      setRows(list);
+      setTotal(json.total ?? list.length);
+      setLastPage(json.last_page ?? 1);
+    } catch (err: any) {
+      console.error("Failed to load restaurant dashboard:", err);
+      setError(err?.message ?? "Failed to load dashboard");
+      setRows([]);
     } finally {
       setLoading(false);
     }
-  }, [categories]);
+  }, [selectedDate, page, debouncedSearch]);
 
   useEffect(() => {
-    if (selectedCategory === "all") {
-      loadAllItems();
-      return;
-    }
-    setLoading(true);
-    getMenusByCategory(selectedCategory)
-      .then(setMenuItems)
-      .catch((err) => console.error("Failed to load menu items:", err))
-      .finally(() => setLoading(false));
-  }, [selectedCategory, loadAllItems]);
+    fetchDashboard();
+  }, [fetchDashboard]);
 
-  // Debounced server-side search via /pos/search_menus
-  useEffect(() => {
-    const query = search.trim();
-    if (query.length === 0) {
-      setSearchResults([]);
-      setSearching(false);
-      return;
-    }
-
-    setSearching(true);
-    const timeout = setTimeout(() => {
-      searchMenus(query)
-        .then(setSearchResults)
-        .catch((err) => console.error("Failed to search menus:", err))
-        .finally(() => setSearching(false));
-    }, 400);
-
-    return () => clearTimeout(timeout);
-  }, [search]);
-
-  const isSearchActive = search.trim().length > 0;
-  const displayedItems = isSearchActive ? searchResults : menuItems;
-  const isLoadingList = isSearchActive ? searching : loading;
-
-  // --- Cart summary (drives the floating "View Cart" bar) ---
-  const cartItemCount = cart.reduce((sum, line) => sum + line.qty, 0);
-  const cartTotal = cart.reduce(
-    (sum, line) => sum + Math.max(line.total - line.discount, 0),
-    0
-  );
-
-  // "Choose Options" only makes sense for rice dishes (fried rice, steam
-  // rice, etc.) which have swappable sides/add-ons. Everything else goes
-  // straight into the cart with no modifiers and no popup in the way.
-  function handleAddPress(item: MenuItem) {
-    const isRiceItem = item.name.toLowerCase().includes("rice");
-    if (isRiceItem) {
-      setModalItem(item);
-      setModalVisible(true);
+  function applyDateDraft() {
+    if (isValidISODate(dateDraft)) {
+      setSelectedDate(dateDraft);
+      setPage(1);
     } else {
-      handleConfirmAddToCart(item, []);
+      // fall back silently to the last valid date rather than crashing
+      setDateDraft(selectedDate);
     }
   }
 
-  function handleConfirmAddToCart(
-    item: MenuItem,
-    selectedModifiers: { id: number; name: string }[]
-  ) {
-    const price = numericPrice(item);
-    setCart((prev) => {
-      // If this exact item (same recipe_id, same modifiers) is already in
-      // the cart, just bump the qty instead of adding a duplicate row.
-      const modifierKey = selectedModifiers
-        .map((m) => m.id)
-        .sort((a, b) => a - b)
-        .join(",");
-      const existingIndex = prev.findIndex((line) => {
-        const lineKey = line.modifiers
-          .map((m) => m.menu_id)
-          .sort((a, b) => a - b)
-          .join(",");
-        return line.recipe_id === item.id && lineKey === modifierKey;
-      });
-
-      if (existingIndex !== -1) {
-        const updated = [...prev];
-        const existing = updated[existingIndex];
-        const newQty = existing.qty + 1;
-        updated[existingIndex] = {
-          ...existing,
-          qty: newQty,
-          total: newQty * existing.price,
-        };
-        return updated;
-      }
-
-      const line: CartLine = {
-        id: makeLineId(),
-        row_id: "new",
-        recipe_id: item.id,
-        name: item.name,
-        qty: 1,
-        price,
-        total: price,
-        discount: 0,
-        modifiers: selectedModifiers.map((m) => ({
-          menu_id: m.id,
-          name: m.name,
-        })),
-      };
-      return [...prev, line];
-    });
-    // Jump straight into the cart popup so the user sees what they just added
-    setCartVisible(true);
+  function goToday() {
+    const d = todayISO();
+    setSelectedDate(d);
+    setDateDraft(d);
+    setPage(1);
   }
 
-  function handleViewCart() {
-    setCartVisible(true);
+  function shiftSelectedDate(days: number) {
+    const next = shiftDate(selectedDate, days);
+    setSelectedDate(next);
+    setDateDraft(next);
+    setPage(1);
   }
 
-  function handleIncrementLine(id: string) {
-    setCart((prev) =>
-      prev.map((line) =>
-        line.id === id
-          ? { ...line, qty: line.qty + 1, total: (line.qty + 1) * line.price }
-          : line
-      )
-    );
+  // --- Calendar picker handlers ---
+  function openPicker() {
+    setTempPickerDate(isoToDate(selectedDate));
+    setPickerVisible(true);
   }
 
-  function handleDecrementLine(id: string) {
-    setCart((prev) =>
-      prev.map((line) =>
-        line.id === id && line.qty > 1
-          ? { ...line, qty: line.qty - 1, total: (line.qty - 1) * line.price }
-          : line
-      )
-    );
-  }
-
-  function handleRemoveLine(id: string) {
-    setCart((prev) => prev.filter((line) => line.id !== id));
-  }
-
-  function handleChangeDiscount(id: string, discount: number) {
-    setCart((prev) =>
-      prev.map((line) => (line.id === id ? { ...line, discount } : line))
-    );
-  }
-
-  const handleChangeNote = (id: string, note: string) => {
-    setCart((prev) =>
-      prev.map((line) => (line.id === id ? { ...line, note } : line))
-    );
-  };
-
-  function handleClearCart() {
-    setCart([]);
-  }
-
-  // "Place Order" inside the cart popup just opens the Order Details popup —
-  // the actual submission happens from there once order type / customer /
-  // service charge etc. are confirmed.
-  function handlePlaceOrder() {
-    setOrderDetailsVisible(true);
-  }
-
-  function handleCancelOrderDetails() {
-    setOrderDetailsVisible(false);
-  }
-
-  async function handleSubmitOrder(details: OrderDetailsForm) {
-    setOrderSubmitting(true);
-    try {
-      // steward_id is required by the backend — "None" isn't a valid value
-      // there, so fall back to the first real steward if nothing was picked.
-      const fallbackStewardId = stewardOptions.find((s) => s.id !== "none")?.id;
-      const stewardIdToSend =
-        details.stewardId != null ? details.stewardId : fallbackStewardId;
-
-      if (stewardIdToSend == null) {
-        console.error("No steward available to assign to this order.");
-        setOrderSubmitting(false);
-        return;
-      }
-
-      const response = await createOrUpdateOrder({
-        order_id: "new",
-        order_type: details.orderType,
-        customer: String(details.customerId),
-        room: details.roomId != null ? String(details.roomId) : undefined,
-        steward_id: Number(stewardIdToSend),
-        restaurant_id: DEFAULT_RESTAURANT_ID,
-        service_charge: details.serviceChargeAmount,
-        cart: cart.map((line) => ({
-          recipe_id: line.recipe_id,
-          name: line.name,
-          qty: line.qty,
-          price: line.price,
-          total: line.total,
-          row_id: line.row_id,
-          modifiers: line.modifiers,
-          note: line.note,
-          discount: line.discount,
-        })),
-      });
-
-      if (details.finalizeImmediately && response?.data?.order_id) {
-        await finalizeOrder({
-          order_id: response.data.order_id,
-          payment_method: "Cash",
-          paid_amount: details.total,
-          given_amount: details.total,
-          change_amount: 0,
-          order_date: new Date().toISOString(),
-        });
-      }
-
-      setPlacedOrder({
-        orderId: response?.data?.order_id ?? null,
-        orderNumber: response?.data?.order_number ?? null,
-        cart,
-        subtotal: details.subtotal,
-        serviceCharge: details.serviceChargeAmount,
-        total: details.total,
-      });
-
-      setOrderDetailsVisible(false);
-      setCartVisible(false);
-      setOrderPlacedVisible(true);
-      setCart([]);
-      fetchRunningOrders();
-    } catch (err: any) {
-      console.error(
-        "Failed to place order - validation errors:",
-        JSON.stringify(err.response?.data, null, 2)
-      );
-    } finally {
-      setOrderSubmitting(false);
+  function onPickerChange(event: DateTimePickerEvent, date?: Date) {
+    if (Platform.OS === "android") {
+      // Android dialog closes itself after pick/cancel — mirror that here.
+      setPickerVisible(false);
+      if (event.type === "dismissed" || !date) return;
+      const iso = dateToISO(date);
+      setSelectedDate(iso);
+      setDateDraft(iso);
+      setPage(1);
+      return;
     }
+    // iOS: just track the in-progress selection, applied on "Done".
+    if (date) setTempPickerDate(date);
   }
 
-  function handleOrderPlacedDone() {
-    setOrderPlacedVisible(false);
-    setPlacedOrder(null);
+  function confirmIosDate() {
+    const iso = dateToISO(tempPickerDate);
+    setSelectedDate(iso);
+    setDateDraft(iso);
+    setPage(1);
+    setPickerVisible(false);
   }
 
-  async function handleCancelRunningOrder(order: RunningOrder) {
-    try {
-      await cancelOrder({ order_id: order.id, reason: "Cancelled from POS" });
-      fetchRunningOrders();
-    } catch (err) {
-      console.error("Failed to cancel order:", err);
-    }
-  }
-
-  async function handleFinalizeRunningOrder(order: RunningOrder) {
-    const raw = (order as any).total ?? (order as any).grand_total ?? 0;
-    const total = typeof raw === "string" ? parseFloat(raw) : raw;
-    const safeAmount = Number.isFinite(total) ? total : 0;
-
-    try {
-      await finalizeOrder({
-        order_id: order.id,
-        payment_method: "Cash",
-        paid_amount: safeAmount,
-        given_amount: safeAmount,
-        change_amount: 0,
-        order_date: new Date().toISOString(),
-      });
-      fetchRunningOrders();
-    } catch (err: any) {
-      console.error(
-        "Failed to finalize order - validation errors:",
-        JSON.stringify(err.response?.data, null, 2)
-      );
-    }
-  }
-
-  // TODO: hook these up to a dedicated screen/modal once that flow is built
-  function handleUpdateRunningOrder(order: RunningOrder) {
-    console.log("Update order", order.id);
-  }
-  function handleSplitRunningOrder(order: RunningOrder) {
-    console.log("Split payment for order", order.id);
-  }
+  const statCards = useMemo(
+    () => [
+      { label: "Today Total Sale", value: todayStats.sale },
+      { label: "Today Total Cost", value: todayStats.cost },
+      { label: "Today Total Income", value: todayStats.income },
+      { label: "Monthly Total Sale", value: monthlyStats.sale },
+      { label: "Monthly Total Cost", value: monthlyStats.cost },
+      { label: "Monthly Total Income", value: monthlyStats.income },
+    ],
+    [todayStats, monthlyStats]
+  );
 
   return (
     <SafeAreaView style={styles.container} edges={["top", "left", "right"]}>
-      <StatusBar
-        barStyle="dark-content"
-        backgroundColor="#ffffff"
-        translucent={false}
-      />
       <SideDrawer
         isOpen={drawerOpen}
         onClose={() => setDrawerOpen(false)}
         userName={userName}
         onNavigate={onNavigate}
         onLogout={onLogout}
+        currentPage="restaurant-dashboard"
       />
 
-      <AddToCartModal
-        visible={modalVisible}
-        item={modalItem}
-        onClose={() => setModalVisible(false)}
-        onAddToCart={handleConfirmAddToCart}
-      />
+      {/* Android: native dialog picker, no wrapper needed */}
+      {pickerVisible && Platform.OS === "android" && (
+        <DateTimePicker
+          value={tempPickerDate}
+          mode="date"
+          display="calendar"
+          onChange={onPickerChange}
+        />
+      )}
 
-      <CartPopup
-        visible={cartVisible}
-        cart={cart}
-        onHide={() => setCartVisible(false)}
-        onIncrement={handleIncrementLine}
-        onDecrement={handleDecrementLine}
-        onRemove={handleRemoveLine}
-        onChangeDiscount={handleChangeDiscount}
-        onChangeNote={handleChangeNote}
-        onClearCart={handleClearCart}
-        onPlaceOrder={handlePlaceOrder}
-      />
-
-      <OrderDetailsPopup
-        visible={orderDetailsVisible}
-        subtotal={cartTotal}
-        onCancel={handleCancelOrderDetails}
-        onSubmit={handleSubmitOrder}
-        submitting={orderSubmitting}
-        customers={customerOptions}
-        stewards={stewardOptions}
-      />
-
-      <OrderPlacedModal
-        visible={orderPlacedVisible}
-        orderId={placedOrder?.orderId ?? null}
-        orderNumber={placedOrder?.orderNumber ?? null}
-        cart={placedOrder?.cart ?? []}
-        subtotal={placedOrder?.subtotal ?? 0}
-        serviceCharge={placedOrder?.serviceCharge ?? 0}
-        total={placedOrder?.total ?? 0}
-        onDone={handleOrderPlacedDone}
-      />
-
-      <RunningOrdersPopup
-        visible={runningOrdersVisible}
-        orders={runningOrders}
-        loading={runningLoading}
-        onClose={() => setRunningOrdersVisible(false)}
-        onRefresh={fetchRunningOrders}
-        onCancel={handleCancelRunningOrder}
-        onUpdate={handleUpdateRunningOrder}
-        onFinalize={handleFinalizeRunningOrder}
-        onSplit={handleSplitRunningOrder}
-      />
+      {/* iOS: inline spinner/calendar inside our own modal, with Done/Cancel */}
+      {Platform.OS === "ios" && (
+        <Modal
+          visible={pickerVisible}
+          transparent
+          animationType="slide"
+          onRequestClose={() => setPickerVisible(false)}
+        >
+          <View style={styles.pickerOverlay}>
+            <View style={styles.pickerSheet}>
+              <View style={styles.pickerHeader}>
+                <TouchableOpacity onPress={() => setPickerVisible(false)}>
+                  <Text style={styles.pickerHeaderBtn}>Cancel</Text>
+                </TouchableOpacity>
+                <Text style={styles.pickerHeaderTitle}>Select Date</Text>
+                <TouchableOpacity onPress={confirmIosDate}>
+                  <Text style={[styles.pickerHeaderBtn, { color: COLORS.primary }]}>
+                    Done
+                  </Text>
+                </TouchableOpacity>
+              </View>
+              <DateTimePicker
+                value={tempPickerDate}
+                mode="date"
+                display="inline"
+                onChange={onPickerChange}
+                themeVariant="light"
+                accentColor={COLORS.primary}
+              />
+            </View>
+          </View>
+        </Modal>
+      )}
 
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity
-          onPress={() => setDrawerOpen(true)}
-          style={styles.hamburgerBtn}
-        >
+        <TouchableOpacity onPress={() => setDrawerOpen(true)} style={styles.hamburgerBtn}>
           <View style={styles.hamburgerBar} />
           <View style={styles.hamburgerBar} />
           <View style={styles.hamburgerBar} />
         </TouchableOpacity>
-
-        <Text style={styles.headerTitle}>Trackerstay</Text>
-
-        <TouchableOpacity>
-          <Text style={styles.bellIcon}>🔔</Text>
+        <Text style={styles.headerTitle}>Restaurant Dashboard</Text>
+        <TouchableOpacity style={styles.mailBtn} onPress={onSendMail}>
+          <Text style={styles.mailBtnText}>Mail</Text>
         </TouchableOpacity>
       </View>
 
-      {/* Search + Running badge */}
-      <View style={styles.searchRow}>
-        <TextInput
-          style={styles.searchInput}
-          placeholder="Search items..."
-          placeholderTextColor="#9ca3af"
-          value={search}
-          onChangeText={setSearch}
-        />
-        <TouchableOpacity
-          style={styles.runningBadge}
-          onPress={() => setRunningOrdersVisible(true)}
-        >
-          <Text style={styles.runningBadgeText}>Running</Text>
-          <View style={styles.runningCountCircle}>
-            <Text style={styles.runningCountText}>{runningCount}</Text>
-          </View>
-        </TouchableOpacity>
-      </View>
-
-      {/* Category chips (hidden while a search query is active) */}
-      {!isSearchActive && (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.chipsRow}
-          contentContainerStyle={styles.chipsContent}
-        >
-          <TouchableOpacity
-            style={[
-              styles.chip,
-              selectedCategory === "all" && styles.chipActive,
-            ]}
-            onPress={() => setSelectedCategory("all")}
-          >
-            <Text
-              style={[
-                styles.chipText,
-                selectedCategory === "all" && styles.chipTextActive,
-              ]}
-              numberOfLines={1}
-            >
-              All
-            </Text>
-          </TouchableOpacity>
-
-          {categories.map((cat) => (
-            <TouchableOpacity
-              key={cat.id}
-              style={[
-                styles.chip,
-                selectedCategory === cat.id && styles.chipActive,
-              ]}
-              onPress={() => setSelectedCategory(cat.id)}
-            >
-              <Text
-                style={[
-                  styles.chipText,
-                  selectedCategory === cat.id && styles.chipTextActive,
-                ]}
-                numberOfLines={1}
-              >
-                {cat.category_name}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
-      )}
-
-      {isLoadingList && (
-        <ActivityIndicator
-          size="large"
-          color="#f4695f"
-          style={{ marginTop: 40 }}
-        />
-      )}
-
-      {!isLoadingList && displayedItems.length === 0 && (
-        <Text style={styles.emptyState}>
-          {isSearchActive ? "No items match your search" : "No items found"}
-        </Text>
-      )}
-
-      {/* Menu item list */}
       <FlatList
-        data={displayedItems}
-        keyExtractor={(item) => item.id.toString()}
-        contentContainerStyle={[
-          styles.list,
-          // Leave room at the bottom so the last card isn't hidden behind
-          // the floating "View Cart" bar when the cart has items.
-          {
-            paddingBottom:
-              insets.bottom + (cart.length > 0 ? 96 : 24),
-          },
-        ]}
-        renderItem={({ item }) => {
-          const imageUrl = getImageUrl(item.image as any);
-          return (
-            <View style={styles.menuCard}>
-              <View style={styles.menuImageWrap}>
-                {imageUrl ? (
-                  <Image
-                    source={{
-                      uri: imageUrl,
-                      headers: authToken
-                        ? { Authorization: `Bearer ${authToken}` }
-                        : undefined,
-                    }}
-                    style={styles.menuImage}
-                    onError={(e) =>
-                      console.warn(
-                        "Image failed to load:",
-                        imageUrl,
-                        e.nativeEvent?.error
-                      )
-                    }
-                  />
-                ) : (
-                  <View style={[styles.menuImage, styles.menuImagePlaceholder]}>
-                    <Text style={{ fontSize: 26 }}>🍽️</Text>
-                  </View>
-                )}
-                <View style={styles.availableDot} />
-              </View>
-
-              <View style={styles.menuInfo}>
-                <Text style={styles.menuCardName}>{item.name}</Text>
-                <Text style={styles.menuCardCode}>
-                  {item.description
-                    ? item.description
-                    : item.item_code
-                    ? `Item code • ${item.item_code}`
-                    : `Item code • ${item.id}`}
-                </Text>
-                <Text style={styles.menuCardPrice}>
-                  Rs. {formatPrice(item)}
-                </Text>
-              </View>
-
-              <TouchableOpacity
-                style={styles.addBtn}
-                onPress={() => handleAddPress(item)}
-              >
-                <Text style={styles.addBtnText}>+ ADD</Text>
+        data={rows}
+        keyExtractor={(item, idx) => String(item.id ?? idx)}
+        contentContainerStyle={{
+          paddingHorizontal: 20,
+          paddingBottom: insets.bottom + 24,
+        }}
+        ListHeaderComponent={
+          <View>
+            {/* Date selector */}
+            <Text style={styles.sectionLabel}>Select Date</Text>
+            <View style={styles.dateRow}>
+              <TouchableOpacity style={styles.dateArrowBtn} onPress={() => shiftSelectedDate(-1)}>
+                <Text style={styles.dateArrowText}>‹</Text>
               </TouchableOpacity>
+
+              {/* Tapping anywhere on this box now opens the calendar picker
+                  instead of relying on manual YYYY-MM-DD typing. */}
+              <TouchableOpacity
+                style={styles.dateInputWrap}
+                activeOpacity={0.7}
+                onPress={openPicker}
+              >
+                <Text style={styles.dateIcon}>📅</Text>
+                <Text style={styles.dateInputText}>{selectedDate}</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.dateArrowBtn} onPress={() => shiftSelectedDate(1)}>
+                <Text style={styles.dateArrowText}>›</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.todayBtn} onPress={goToday}>
+                <Text style={styles.todayBtnText}>Today</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Stat cards */}
+            <View style={styles.statsGrid}>
+              {statCards.map((s) => (
+                <View key={s.label} style={styles.statCard}>
+                  <Text style={styles.statLabel}>{s.label}</Text>
+                  <Text style={styles.statValue}>Rs.{money(s.value)}</Text>
+                </View>
+              ))}
+            </View>
+
+            {/* Search */}
+            <View style={styles.searchWrap}>
+              <Text style={styles.searchIcon}>🔍</Text>
+              <TextInput
+                style={styles.searchInput}
+                placeholder="Type in to Search"
+                placeholderTextColor={COLORS.grayLight}
+                value={search}
+                onChangeText={setSearch}
+              />
+            </View>
+
+            {error && (
+              <View style={styles.errorBox}>
+                <Text style={styles.errorText}>{error}</Text>
+              </View>
+            )}
+            {loading && (
+              <ActivityIndicator size="large" color={COLORS.primary} style={{ marginTop: 16 }} />
+            )}
+
+            <Text style={styles.itemsHeading}>Items</Text>
+          </View>
+        }
+        renderItem={({ item }) => {
+          const name = item.item_name ?? item.name ?? "-";
+          const price = item.price ?? 0;
+          const qty = item.quantity ?? item.qty ?? 0;
+          const amount = item.amount ?? item.total ?? 0;
+          const status = item.paid_status ?? item.status ?? "-";
+          const statusColors = paidStatusStyle(String(status));
+          return (
+            <View style={styles.card}>
+              <View style={styles.cardRowTop}>
+                <Text style={styles.itemName} numberOfLines={1}>
+                  {name}
+                </Text>
+                <View style={[styles.statusPill, { backgroundColor: statusColors.bg }]}>
+                  <Text style={[styles.statusText, { color: statusColors.color }]}>
+                    {status}
+                  </Text>
+                </View>
+              </View>
+              <View style={styles.divider} />
+              <View style={styles.cardRow}>
+                <Text style={styles.label}>Price</Text>
+                <Text style={styles.value}>Rs. {money(price)}</Text>
+              </View>
+              <View style={styles.cardRow}>
+                <Text style={styles.label}>Quantity</Text>
+                <Text style={styles.value}>{qty}</Text>
+              </View>
+              <View style={styles.cardRow}>
+                <Text style={styles.label}>Amount</Text>
+                <Text style={styles.amountValue}>Rs. {money(amount)}</Text>
+              </View>
             </View>
           );
         }}
+        ListEmptyComponent={
+          !loading && !error ? (
+            <View style={styles.emptyWrap}>
+              <Text style={styles.emptyEmoji}>📊</Text>
+              <Text style={styles.emptyState}>No data available in table</Text>
+            </View>
+          ) : null
+        }
+        ListFooterComponent={
+          !loading && rows.length > 0 ? (
+            <View style={styles.pagination}>
+              <TouchableOpacity
+                style={[styles.pageBtn, page <= 1 && styles.pageBtnDisabled]}
+                onPress={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={page <= 1}
+              >
+                <Text style={styles.pageBtnText}>‹ Prev</Text>
+              </TouchableOpacity>
+              <Text style={styles.pageIndicator}>
+                Page {page} of {lastPage} · {total} total
+              </Text>
+              <TouchableOpacity
+                style={[styles.pageBtn, page >= lastPage && styles.pageBtnDisabled]}
+                onPress={() => setPage((p) => Math.min(lastPage, p + 1))}
+                disabled={page >= lastPage}
+              >
+                <Text style={styles.pageBtnText}>Next ›</Text>
+              </TouchableOpacity>
+            </View>
+          ) : null
+        }
       />
-
-      {/* Floating "View Cart" summary bar — shown only once something has
-          been added to the cart. Mirrors the reference screenshot: item
-          count + running total on the left, "View Cart" link on the right. */}
-      {cart.length > 0 && (
-        <TouchableOpacity
-          activeOpacity={0.9}
-          onPress={handleViewCart}
-          style={[
-            styles.viewCartBar,
-            { bottom: insets.bottom + 12 },
-          ]}
-        >
-          <View>
-            <Text style={styles.viewCartCount}>
-              {cartItemCount} ITEM{cartItemCount !== 1 ? "S" : ""}
-            </Text>
-            <Text style={styles.viewCartTotal}>
-              Rs. {cartTotal.toFixed(2)}
-            </Text>
-          </View>
-          <Text style={styles.viewCartLink}>View Cart</Text>
-        </TouchableOpacity>
-      )}
     </SafeAreaView>
   );
 }
@@ -779,21 +514,17 @@ export default function DashboardScreen({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#ffffff",
+    backgroundColor: COLORS.bg,
   },
   header: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    paddingHorizontal: 20,
-    paddingVertical: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 14,
     borderBottomWidth: 1,
-    borderBottomColor: "#f0f0f0",
-  },
-  headerTitle: {
-    fontSize: 22,
-    fontWeight: "800",
-    color: "#1a1a2e",
+    borderBottomColor: COLORS.borderLight,
+    backgroundColor: COLORS.bg,
   },
   hamburgerBtn: {
     width: 26,
@@ -804,200 +535,280 @@ const styles = StyleSheet.create({
     height: 3,
     width: 26,
     borderRadius: 2,
-    backgroundColor: "#f4695f",
+    backgroundColor: COLORS.primary,
   },
-  bellIcon: {
-    fontSize: 24,
-  },
-  searchRow: {
-    flexDirection: "row",
-    gap: 12,
-    paddingHorizontal: 20,
-    paddingTop: 16,
-  },
-  searchInput: {
-    flex: 1,
-    borderWidth: 1,
-    borderColor: "#e5e7eb",
-    borderRadius: 24,
-    paddingHorizontal: 18,
-    paddingVertical: 12,
-    fontSize: 14,
-  },
-  runningBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    backgroundColor: "#f4695f",
-    borderRadius: 24,
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-  },
-  runningBadgeText: {
-    color: "#ffffff",
-    fontWeight: "700",
-    fontSize: 14,
-  },
-  runningCountCircle: {
-    backgroundColor: "#ffffff",
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  runningCountText: {
-    color: "#f4695f",
-    fontSize: 12,
-    fontWeight: "700",
-  },
-  chipsRow: {
-    marginTop: 16,
-    flexGrow: 0,
-    minHeight: 48,
-  },
-  chipsContent: {
-    paddingHorizontal: 20,
-    paddingRight: 40,
-    alignItems: "center",
-    paddingVertical: 2,
-  },
-  chip: {
-    borderWidth: 1,
-    borderColor: "#e5e7eb",
-    borderRadius: 20,
-    paddingHorizontal: 18,
-    paddingVertical: 10,
-    marginRight: 10,
-    flexShrink: 0,
-    minHeight: 40,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  chipActive: {
-    backgroundColor: "#f4695f",
-    borderColor: "#f4695f",
-  },
-  chipText: {
-    fontWeight: "700",
-    fontSize: 14,
-    color: "#1a1a2e",
-    lineHeight: Platform.OS === "android" ? 20 : 18,
-    includeFontPadding: false,
-    textAlignVertical: "center",
-  },
-  chipTextActive: {
-    color: "#ffffff",
-  },
-  list: {
-    paddingHorizontal: 20,
-    paddingTop: 16,
-    paddingBottom: 20,
-  },
-  menuCard: {
-    flexDirection: "row",
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: "#f0f0f0",
-    borderRadius: 16,
-    padding: 12,
-    marginBottom: 14,
-    gap: 12,
-  },
-  menuImageWrap: {
-    position: "relative",
-  },
-  menuImage: {
-    width: 72,
-    height: 72,
-    borderRadius: 12,
-  },
-  menuImagePlaceholder: {
-    backgroundColor: "#f6f6f6",
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  availableDot: {
-    position: "absolute",
-    top: -3,
-    right: -3,
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    backgroundColor: "#22c55e",
-    borderWidth: 2,
-    borderColor: "#ffffff",
-  },
-  menuInfo: {
-    flex: 1,
-    justifyContent: "center",
-  },
-  menuCardName: {
-    fontWeight: "700",
-    fontSize: 15,
-    color: "#1a1a2e",
-    marginBottom: 4,
-  },
-  menuCardCode: {
-    fontSize: 12,
-    color: "#9ca3af",
-    marginBottom: 6,
-  },
-  menuCardPrice: {
-    fontSize: 15,
-    color: "#f4695f",
+  headerTitle: {
+    fontSize: 18,
     fontWeight: "800",
+    color: COLORS.dark,
   },
-  addBtn: {
-    borderWidth: 1.5,
-    borderColor: "#f4695f",
+  mailBtn: {
+    backgroundColor: COLORS.teal,
     borderRadius: 10,
-    paddingHorizontal: 14,
+    paddingHorizontal: 16,
     paddingVertical: 8,
   },
-  addBtnText: {
-    color: "#f4695f",
+  mailBtnText: {
+    color: "#ffffff",
     fontWeight: "700",
     fontSize: 13,
   },
-  emptyState: {
-    textAlign: "center",
-    color: "#9ca3af",
-    marginTop: 40,
+  sectionLabel: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: COLORS.dark,
+    marginTop: 18,
+    marginBottom: 8,
   },
-  // --- Floating "View Cart" bar ---
-  viewCartBar: {
-    position: "absolute",
-    left: 20,
-    right: 20,
-    backgroundColor: "#f4695f",
-    borderRadius: 16,
-    paddingHorizontal: 20,
-    paddingVertical: 14,
+  dateRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+  },
+  dateArrowBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  dateArrowText: {
+    fontSize: 18,
+    fontWeight: "700",
+    color: COLORS.dark,
+  },
+  dateInputWrap: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: COLORS.cardBg,
+  },
+  dateIcon: {
+    fontSize: 14,
+    marginRight: 8,
+    opacity: 0.6,
+  },
+  dateInputText: {
+    flex: 1,
+    fontSize: 14,
+    color: COLORS.dark,
+    fontWeight: "600",
+  },
+  todayBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 10,
+    backgroundColor: COLORS.primaryLight,
+  },
+  todayBtnText: {
+    color: COLORS.primary,
+    fontWeight: "700",
+    fontSize: 12,
+  },
+  // --- iOS calendar modal ---
+  pickerOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.35)",
+    justifyContent: "flex-end",
+  },
+  pickerSheet: {
+    backgroundColor: COLORS.bg,
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    paddingBottom: 24,
+  },
+  pickerHeader: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    elevation: 6,
+    paddingHorizontal: 20,
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.borderLight,
   },
-  viewCartCount: {
-    color: "#ffffff",
+  pickerHeaderTitle: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: COLORS.dark,
+  },
+  pickerHeaderBtn: {
+    fontSize: 15,
+    fontWeight: "700",
+    color: COLORS.gray,
+  },
+  statsGrid: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    justifyContent: "space-between",
+    marginTop: 18,
+    gap: 10,
+  },
+  statCard: {
+    width: "48%",
+    borderWidth: 1,
+    borderColor: COLORS.borderLight,
+    borderRadius: 14,
+    paddingVertical: 14,
+    paddingHorizontal: 14,
+    backgroundColor: COLORS.cardBg,
+    marginBottom: 10,
+  },
+  statLabel: {
+    fontSize: 12,
+    color: COLORS.gray,
+    fontWeight: "600",
+    marginBottom: 6,
+  },
+  statValue: {
+    fontSize: 17,
+    color: COLORS.teal,
+    fontWeight: "800",
+  },
+  searchWrap: {
+    flexDirection: "row",
+    alignItems: "center",
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    borderRadius: 24,
+    paddingHorizontal: 16,
+    backgroundColor: COLORS.cardBg,
+    marginTop: 6,
+  },
+  searchIcon: {
+    fontSize: 14,
+    marginRight: 8,
+    opacity: 0.5,
+  },
+  searchInput: {
+    flex: 1,
+    paddingVertical: 12,
+    fontSize: 14,
+    color: COLORS.dark,
+  },
+  errorBox: {
+    backgroundColor: COLORS.redLight,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    marginTop: 14,
+  },
+  errorText: {
+    color: COLORS.red,
+    fontWeight: "600",
+    fontSize: 13,
+  },
+  itemsHeading: {
+    fontSize: 15,
+    fontWeight: "800",
+    color: COLORS.dark,
+    marginTop: 18,
+    marginBottom: 4,
+  },
+  card: {
+    borderWidth: 1,
+    borderColor: COLORS.borderLight,
+    borderRadius: 16,
+    padding: 16,
+    marginTop: 14,
+    backgroundColor: COLORS.cardBg,
+    shadowColor: COLORS.dark,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.04,
+    shadowRadius: 8,
+    elevation: 1,
+  },
+  cardRowTop: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 10,
+    gap: 10,
+  },
+  itemName: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: "800",
+    color: COLORS.dark,
+  },
+  statusPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 20,
+  },
+  statusText: {
     fontSize: 12,
     fontWeight: "700",
-    opacity: 0.9,
-    marginBottom: 2,
   },
-  viewCartTotal: {
-    color: "#ffffff",
-    fontSize: 18,
+  divider: {
+    height: 1,
+    backgroundColor: COLORS.borderLight,
+    marginBottom: 10,
+  },
+  cardRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    paddingVertical: 4,
+  },
+  label: {
+    fontSize: 13,
+    color: COLORS.gray,
+    fontWeight: "600",
+  },
+  value: {
+    fontSize: 13,
+    color: COLORS.dark,
+    fontWeight: "700",
+  },
+  amountValue: {
+    fontSize: 13,
+    color: COLORS.primary,
     fontWeight: "800",
   },
-  viewCartLink: {
-    color: "#ffffff",
-    fontSize: 16,
-    fontWeight: "800",
+  emptyWrap: {
+    alignItems: "center",
+    marginTop: 50,
+  },
+  emptyEmoji: {
+    fontSize: 32,
+    marginBottom: 8,
+  },
+  emptyState: {
+    textAlign: "center",
+    color: COLORS.grayLight,
+    fontWeight: "600",
+  },
+  pagination: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginTop: 18,
+  },
+  pageBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    backgroundColor: COLORS.bg,
+  },
+  pageBtnDisabled: {
+    opacity: 0.4,
+  },
+  pageBtnText: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: COLORS.dark,
+  },
+  pageIndicator: {
+    fontSize: 12,
+    color: COLORS.gray,
+    fontWeight: "600",
   },
 });

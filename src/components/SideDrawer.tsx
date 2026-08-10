@@ -8,14 +8,21 @@ import {
   ScrollView,
 } from "react-native";
 
+type NavPage =
+  | "dashboard"
+  | "history"
+  | "restaurant-dashboard"
+  | "restaurant-orders";
+
 interface SideDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   userName: string;
-  onNavigate: (
-    page: "dashboard" | "history" | "restaurant-dashboard" | "restaurant-orders"
-  ) => void;
+  onNavigate: (page: NavPage) => void;
   onLogout: () => void;
+  // Which page is currently showing — used to highlight the matching item.
+  // Optional so existing call sites that haven't been updated yet don't break.
+  currentPage?: NavPage;
 }
 
 export default function SideDrawer({
@@ -24,7 +31,32 @@ export default function SideDrawer({
   userName,
   onNavigate,
   onLogout,
+  currentPage,
 }: SideDrawerProps) {
+  // "Menu Items" etc below don't have their own screens yet — kept pointing
+  // at "dashboard" until those pages exist, same as before.
+  const menuItems: {
+    key: NavPage | "kot" | "recipes" | "menu-items" | "qr-orders" | "terminal-access";
+    label: string;
+    icon: string;
+    page: NavPage;
+  }[] = [
+    { key: "restaurant-dashboard", label: "Home", icon: "🏠", page: "restaurant-dashboard" },
+    { key: "dashboard", label: "Dashboard", icon: "🧮", page: "dashboard" },
+    { key: "history", label: "History", icon: "📋", page: "history" },
+    { key: "restaurant-orders", label: "Restaurant Orders", icon: "🍽️", page: "restaurant-orders" },
+    { key: "kot", label: "KOT", icon: "🧾", page: "dashboard" },
+    { key: "recipes", label: "Recipes (BOM)", icon: "📖", page: "dashboard" },
+    { key: "menu-items", label: "Menu Items", icon: "🍔", page: "dashboard" },
+    { key: "qr-orders", label: "QR Table Orders", icon: "📱", page: "dashboard" },
+    { key: "terminal-access", label: "POS Terminal Access", icon: "🔐", page: "dashboard" },
+  ];
+
+  function handlePress(page: NavPage) {
+    onNavigate(page);
+    onClose();
+  }
+
   return (
     <Modal visible={isOpen} transparent animationType="fade">
       <View style={styles.overlay}>
@@ -45,109 +77,41 @@ export default function SideDrawer({
             <View style={styles.drawerBody}>
               <Text style={styles.menuLabel}>MAIN MENU</Text>
 
-              <TouchableOpacity
-                style={styles.drawerItem}
-                onPress={() => {
-                  onNavigate("dashboard");
-                  onClose();
-                }}
-              >
-                <View style={styles.drawerItemIcon}>
-                  <Text style={{ fontSize: 18 }}>🏠</Text>
-                </View>
-                <Text style={styles.drawerItemText}>Dashboard</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.drawerItem}
-                onPress={() => {
-                  onNavigate("history");
-                  onClose();
-                }}
-              >
-                <View style={styles.drawerItemIcon}>
-                  <Text style={{ fontSize: 18 }}>📋</Text>
-                </View>
-                <Text style={styles.drawerItemText}>History</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.drawerItem}
-                onPress={() => {
-                  onNavigate("restaurant-orders");
-                  onClose();
-                }}
-              >
-                <View style={styles.drawerItemIcon}>
-                  <Text style={{ fontSize: 18 }}>🍽️</Text>
-                </View>
-                <Text style={styles.drawerItemText}>Restaurant Orders</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.drawerItem}
-                onPress={() => {
-                  onNavigate("dashboard");
-                  onClose();
-                }}
-              >
-                <View style={styles.drawerItemIcon}>
-                  <Text style={{ fontSize: 18 }}>🧾</Text>
-                </View>
-                <Text style={styles.drawerItemText}>KOT</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.drawerItem}
-                onPress={() => {
-                  onNavigate("dashboard");
-                  onClose();
-                }}
-              >
-                <View style={styles.drawerItemIcon}>
-                  <Text style={{ fontSize: 18 }}>📖</Text>
-                </View>
-                <Text style={styles.drawerItemText}>Recipes (BOM)</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.drawerItem}
-                onPress={() => {
-                  onNavigate("dashboard");
-                  onClose();
-                }}
-              >
-                <View style={styles.drawerItemIcon}>
-                  <Text style={{ fontSize: 18 }}>🍔</Text>
-                </View>
-                <Text style={styles.drawerItemText}>Menu Items</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.drawerItem}
-                onPress={() => {
-                  onNavigate("dashboard");
-                  onClose();
-                }}
-              >
-                <View style={styles.drawerItemIcon}>
-                  <Text style={{ fontSize: 18 }}>📱</Text>
-                </View>
-                <Text style={styles.drawerItemText}>QR Table Orders</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={styles.drawerItem}
-                onPress={() => {
-                  onNavigate("dashboard");
-                  onClose();
-                }}
-              >
-                <View style={styles.drawerItemIcon}>
-                  <Text style={{ fontSize: 18 }}>🔐</Text>
-                </View>
-                <Text style={styles.drawerItemText}>POS Terminal Access</Text>
-              </TouchableOpacity>
+              {menuItems.map((item) => {
+                // Only truly-unique-destination items (Home, Dashboard,
+                // History, Restaurant Orders) get highlighted — the
+                // placeholder items sharing "dashboard" as their target
+                // would otherwise all light up together, which is confusing.
+                const isActive =
+                  currentPage === item.page &&
+                  ["restaurant-dashboard", "dashboard", "history", "restaurant-orders"].includes(
+                    item.key
+                  );
+                return (
+                  <TouchableOpacity
+                    key={item.key}
+                    style={[styles.drawerItem, isActive && styles.drawerItemActive]}
+                    onPress={() => handlePress(item.page)}
+                  >
+                    <View
+                      style={[
+                        styles.drawerItemIcon,
+                        isActive && styles.drawerItemIconActive,
+                      ]}
+                    >
+                      <Text style={{ fontSize: 18 }}>{item.icon}</Text>
+                    </View>
+                    <Text
+                      style={[
+                        styles.drawerItemText,
+                        isActive && styles.drawerItemTextActive,
+                      ]}
+                    >
+                      {item.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
 
               <View style={styles.divider} />
 
@@ -238,6 +202,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     borderRadius: 12,
   },
+  drawerItemActive: {
+    backgroundColor: "#fdece9",
+  },
   drawerItemIcon: {
     width: 38,
     height: 38,
@@ -246,10 +213,17 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
   },
+  drawerItemIconActive: {
+    backgroundColor: "#f4695f",
+  },
   drawerItemText: {
     fontSize: 16,
     fontWeight: "600",
     color: "#1a1a2e",
+  },
+  drawerItemTextActive: {
+    color: "#f4695f",
+    fontWeight: "800",
   },
   divider: {
     height: 1,

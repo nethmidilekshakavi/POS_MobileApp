@@ -25,12 +25,16 @@ const USER_NAME_KEY = "user_name";
 // AsyncStorage read.
 const MIN_SPLASH_MS = 1200;
 
+// "restaurant-dashboard" (Home) is the app's landing page — both right
+// after login and when an existing session is restored on cold start.
+const HOME_PAGE: Page = "restaurant-dashboard";
+
 export default function App() {
   const [currentPage, setCurrentPage] = useState<Page>("loading");
   const [userName, setUserName] = useState("");
 
   // Bootstrap: check for an existing session while the splash is showing,
-  // then route straight to the dashboard or the login screen.
+  // then route straight to Home or the login screen.
   useEffect(() => {
     let cancelled = false;
 
@@ -45,7 +49,7 @@ export default function App() {
 
       if (token) {
         setUserName(savedName || "User");
-        setCurrentPage("dashboard");
+        setCurrentPage(HOME_PAGE);
       } else {
         setCurrentPage("login");
       }
@@ -60,7 +64,7 @@ export default function App() {
     await AsyncStorage.setItem(AUTH_TOKEN_KEY, token);
     if (name) await AsyncStorage.setItem(USER_NAME_KEY, name);
     setUserName(name || "User");
-    setCurrentPage("dashboard");
+    setCurrentPage(HOME_PAGE);
   };
 
   const handleLogout = async () => {
@@ -80,6 +84,7 @@ export default function App() {
           userName={userName}
           onLogout={handleLogout}
           onNavigate={(page) => setCurrentPage(page as Page)}
+          activePage="dashboard"
         />
       )}
       {currentPage === "history" && (
@@ -87,13 +92,18 @@ export default function App() {
           userName={userName}
           onLogout={handleLogout}
           onNavigate={(page) => setCurrentPage(page as Page)}
+          activePage="history"
         />
       )}
       {currentPage === "restaurant-dashboard" && (
-        <RestaurantDashboardScreen onBack={() => setCurrentPage("dashboard")} />
+        <RestaurantDashboardScreen
+          userName={userName}
+          onLogout={handleLogout}
+          onNavigate={(page) => setCurrentPage(page as Page)}
+        />
       )}
       {currentPage === "restaurant-orders" && (
-        <RestaurantOrdersScreen onBack={() => setCurrentPage("dashboard")} />
+        <RestaurantOrdersScreen onBack={() => setCurrentPage(HOME_PAGE)} />
       )}
     </SafeAreaProvider>
   );

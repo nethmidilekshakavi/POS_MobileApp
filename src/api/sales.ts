@@ -26,7 +26,7 @@ export interface PosSalesSummary {
 }
 
 export const getPosSales = async (date: string): Promise<PosSalesSummary> => {
-  const response = await apiClient.get("api/v1/pos/sales", {
+  const response = await apiClient.get("v1/pos/sales", {
     params: { date },
   });
   // Adjust if the real payload is nested under response.data.data instead.
