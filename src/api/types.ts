@@ -46,32 +46,28 @@ export interface CreateOrderPayload {
   cart: CartItem[];
 }
 
-export interface Order {
-  id: number;
-  order_id?: string;
-  customer_name?: string;
-  status: string;
-  type?: string;
+export type Order = {
+  id: number | string;
+  order_id?: string | number;
+  order_id_display?: string | number;
+  order_number?: string;
+  customer_name?: string | null;
+  status?: string;
   total?: number;
-  table_id?: number;
-  restaurant_id?: number;
-  hotel_id?: number;
-  created_at: string;
-  order_list_detail?: any[];
-  kot_lists?: any[];
-}
+  amount?: number;
+  payment_type?: string;
+  payment_method?: string;
+  created_at?: string;
+  items?: any[];
+};
 
-export interface RunningOrder {
+export type RunningOrder = {
   id: number;
-  total: number;
-  created_at: string;
-  customer_name: string;
-  room_number: string | null;
-  table_id: number;
-  steward_name: string;
-  item_count: number;
-  is_ready: boolean;
-}
+  order_id: string;
+  status: string;
+  customer_name?: string;
+  created_at?: string;
+};
 
 export interface Table {
   id: number;
