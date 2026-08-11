@@ -14,7 +14,9 @@ import {
 } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import SideDrawer from "../components/SideDrawer";
+import EditMenuItemModal, { EditableMenuItem } from "../components/EditMenuItemModal";
 import apiClient from "../api/client";
+import { getMenuItemDetail } from "../api/menu";
 
 /* ---------------- Types ---------------- */
 type NavPage =
@@ -208,31 +210,20 @@ function parseDetailResponse(json: any): MenuDetail | null {
   return null;
 }
 
-/* ---------------- Update helper (PATCH with fallback) ---------------- */
+/* ---------------- Update helper ---------------- */
 async function updateMenuItemRequest(id: number, payload: Record<string, any>) {
-  // Try PATCH first
-  try {
-    const res = await apiClient.patch(`api/pos/menu_item/${id}`, payload);
-    return res;
-  } catch (err: any) {
-    // If PATCH not available, try POST to same path
-    if (__DEV__) console.log("PATCH failed, trying POST for update:", err?.response?.status);
-    try {
-      const res2 = await apiClient.post(`api/pos/menu_item/${id}`, payload);
-      return res2;
-    } catch (err2: any) {
-      if (__DEV__) console.log("POST update also failed:", err2?.response?.status);
-      throw err2;
-    }
-  }
+  // NOTE: api/pos/menu_item/{id} is GET-only in api.php (fetches detail).
+  // Writes go to POST api/pos/menu_item/{id}/update — see route_snippet.txt.
+  return apiClient.post(`api/pos/menu_item/${id}/update`, payload);
 }
 
 /* ---------------- Availability endpoint helper ---------------- */
 async function updateAvailabilityRequest(id: number, isAvailable: boolean) {
-  // Backend-provided endpoint:
-  // POST /api/pos/menu_items/update_availability
-  const payload = { id, is_available: isAvailable ? 1 : 0 };
-  return apiClient.post("api/pos/menu_items/update_availability", payload);
+  // NOTE: there is no dedicated "update_availability" route in api.php.
+  // Using the same POST /api/pos/menu_item/{id}/update endpoint that the
+  // Edit popup uses (see route_snippet.txt) — add that route + controller
+  // method for this to actually persist.
+  return apiClient.post(`api/pos/menu_item/${id}/update`, { is_available: isAvailable ? 1 : 0 });
 }
 
 /* ---------------- Component ---------------- */
@@ -267,6 +258,11 @@ export default function MenuManagementScreen({ userName, onLogout, onNavigate }:
 
   const [addModalVisible, setAddModalVisible] = useState(false);
   const [newItem, setNewItem] = useState({ name: "", code: "", price: "", cost: "", type: "Menu Item" });
+
+  // Edit Menu Item popup state
+  const [editModalVisible, setEditModalVisible] = useState(false);
+  const [editingItem, setEditingItem] = useState<EditableMenuItem | null>(null);
+  const [editLoadingId, setEditLoadingId] = useState<number | null>(null);
 
   useEffect(() => {
     const t = setTimeout(() => {
@@ -513,8 +509,44 @@ export default function MenuManagementScreen({ userName, onLogout, onNavigate }:
     await performUpdate(rowId, { status: nextStatus });
   }
 
-  function handleEdit(row: MenuRow) {
-    notifyMissingEndpoint("Edit item");
+  // Open the Edit Menu Item popup for a row. Uses whatever detail is already
+  // cached (from expanding the row) and tops it up with a fresh fetch from
+  // api/v1/menus/{id} (via getMenuItemDetail) so the popup always has the
+  // full record — category + restaurant relations only come from that
+  // endpoint; api/pos/menu_item/{id} does not include them.
+  async function handleEdit(row: MenuRow) {
+    setEditLoadingId(row.id);
+    try {
+      const cached = detailsCache[row.id];
+      const base: EditableMenuItem = { ...(row as any), ...(cached ?? {}) };
+      setEditingItem(base);
+      setEditModalVisible(true);
+
+      const parsed = await getMenuItemDetail(row.id);
+
+      if (parsed) {
+        setDetailsCache((s) => ({ ...s, [row.id]: { ...(s[row.id] || {}), ...parsed } }));
+        setEditingItem((prev) => (prev && prev.id === row.id ? { ...prev, ...parsed } : prev));
+      }
+    } catch (err: any) {
+      console.error(`Failed to load menu item ${row.id} for edit:`, err);
+      // Popup still opens with whatever data we had (usually the row's list data).
+    } finally {
+      setEditLoadingId(null);
+    }
+  }
+
+  function handleEditSaved(updated: any) {
+    if (!editingItem) return;
+    const id = editingItem.id;
+    const parsed = parseDetailResponse(updated) ?? updated ?? {};
+
+    setRows((prev) => prev.map((r) => (r.id === id ? { ...r, ...parsed } : r)));
+    setDetailsCache((s) => ({ ...s, [id]: { ...(s[id] || {}), ...parsed } }));
+    if (parsed.is_available !== undefined || parsed.today_availability !== undefined) {
+      setLocalAvailability((s) => ({ ...s, [id]: toBool(parsed.is_available ?? parsed.today_availability) }));
+    }
+    setEditingItem(null);
   }
 
   function handleDisable(row: MenuRow) {
@@ -673,6 +705,7 @@ export default function MenuManagementScreen({ userName, onLogout, onNavigate }:
               const expanded = Boolean(expandedIds[item.id]);
               const available = isAvailable(item);
               const updating = Boolean(updateLoading[item.id]);
+              const editLoading = editLoadingId === item.id;
 
               return (
                 <View>
@@ -710,8 +743,12 @@ export default function MenuManagementScreen({ userName, onLogout, onNavigate }:
                     <View style={styles.expanded}>
                       {renderDetail(item.id)}
                       <View style={styles.actionsRow}>
-                        <TouchableOpacity style={styles.actionBtn} onPress={() => handleEdit(item)}>
-                          <Text style={styles.actionIcon}>✏️</Text>
+                        <TouchableOpacity style={styles.actionBtn} onPress={() => handleEdit(item)} disabled={editLoading}>
+                          {editLoading ? (
+                            <ActivityIndicator size="small" color={COLORS.gray} />
+                          ) : (
+                            <Text style={styles.actionIcon}>✏️</Text>
+                          )}
                           <Text style={styles.actionLabel}>Edit</Text>
                         </TouchableOpacity>
                         <TouchableOpacity style={styles.actionBtn} onPress={() => handleDisable(item)}>
@@ -817,6 +854,19 @@ export default function MenuManagementScreen({ userName, onLogout, onNavigate }:
           </View>
         </View>
       </Modal>
+
+      {/* Edit Menu Item popup */}
+      <EditMenuItemModal
+        visible={editModalVisible}
+        item={editingItem}
+        onClose={() => {
+          setEditModalVisible(false);
+          setEditingItem(null);
+        }}
+        onSaved={handleEditSaved}
+      />
+
+
     </SafeAreaView>
   );
 }
