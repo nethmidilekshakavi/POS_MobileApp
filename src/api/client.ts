@@ -2,7 +2,7 @@ import axios from "axios";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 
-export const API_BASE_URL = "https://live.trackerstay.com";
+export const API_BASE_URL = "https://demo.trackerstay.com";
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,

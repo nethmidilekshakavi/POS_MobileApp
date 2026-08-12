@@ -11,6 +11,7 @@ import {
   Image,
   Platform,
   StatusBar,
+  Alert,
 } from "react-native";
 import {
   SafeAreaView,
@@ -36,7 +37,7 @@ import OrderPlacedModal from "../components/OrderPlacedModal";
 import RunningOrdersPopup from "../components/RunningOrdersPopup";
 import { getStewards, Steward } from "../api/stewards";
 import { getCustomers, Customer } from "../api/customers";
-import { SelectOption } from "../components/OrderDetailsPopup";
+import { CustomerOption, SelectOption } from "../components/OrderDetailsPopup";
 import TableSelectPopup from "../components/TableSelectPopup";
 import { getTables, Table } from "../api/tables";
 import FinalizeBillPopup, { FinalizeBillForm } from "../components/FinalizeBillPopup";
@@ -44,6 +45,10 @@ import FinalizeBillPopup, { FinalizeBillForm } from "../components/FinalizeBillP
 const AUTH_TOKEN_KEY = "auth_token";
 
 const DEFAULT_RESTAURANT_ID = 1;
+
+// Kitchen status that blocks cancellation — once the kitchen has marked an
+// order Ready, it's too far along to cancel from the POS.
+const UNCANCELLABLE_STATUS = "Ready";
 
 type NavPage = "dashboard" | "history" | "restaurant-dashboard" | "restaurant-orders";
 
@@ -140,10 +145,10 @@ export default function DashboardScreen({
     { id: "none", label: "None" },
   ]);
 
-  // Customer options for the Order Details popup — selecting a real
-  // customer here is what drives the "Room" dropdown's API fetch inside
-  // OrderDetailsPopup (see api/rooms.ts -> getCustomerRooms).
-  const [customerOptions, setCustomerOptions] = useState<SelectOption[]>([
+  // Customer options for the Order Details popup — each one carries
+  // `roomNumbers` straight from GET /pos/customers, which is what drives
+  // the "Room" dropdown inside OrderDetailsPopup (no separate rooms call).
+  const [customerOptions, setCustomerOptions] = useState<CustomerOption[]>([
     { id: "walkin", label: "Walk-in Customer" },
   ]);
 
@@ -217,7 +222,7 @@ export default function DashboardScreen({
   useEffect(() => {
     getCustomers()
       .then((customers: Customer[]) => {
-        const options: SelectOption[] = [
+        const options: CustomerOption[] = [
           { id: "walkin", label: "Walk-in Customer" },
           ...customers.map((c) => ({
             id: c.id,
@@ -487,8 +492,6 @@ export default function DashboardScreen({
         return;
       }
 
-      // DashboardScreen.tsx — handleSubmitOrder eke
-
       const response = await createOrUpdateOrder({
         order_id: "new",
         order_type: details.orderType,
@@ -569,7 +572,19 @@ export default function DashboardScreen({
     setPlacedOrder(null);
   }
 
+  // Kitchen has already marked an order Ready — too late to cancel from the
+  // POS at that point, so block it here (before the confirm/cancel request
+  // ever goes out) with a clear explanation instead of a silent failure or
+  // a confusing backend error.
   async function handleCancelRunningOrder(order: RunningOrder) {
+    if (order.status === UNCANCELLABLE_STATUS) {
+      Alert.alert(
+        "Cannot Cancel Order",
+        "This order is already marked Ready by the kitchen and can no longer be cancelled."
+      );
+      return;
+    }
+
     try {
       await cancelOrder({ order_id: order.id, reason: "Cancelled from POS" });
       fetchRunningOrders();

@@ -18,7 +18,7 @@ import DateTimePicker, {
 import SideDrawer from "../components/SideDrawer";
 
 const AUTH_TOKEN_KEY = "auth_token";
-const API_BASE_URL = "https://live.trackerstay.com";
+const API_BASE_URL = "https://demo.trackerstay.com";
 
 type NavPage = "dashboard" | "history" | "restaurant-dashboard" | "restaurant-orders";
 
