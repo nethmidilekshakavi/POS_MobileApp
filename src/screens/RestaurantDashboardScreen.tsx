@@ -37,12 +37,12 @@ import RunningOrdersPopup from "../components/RunningOrdersPopup";
 import { getStewards, Steward } from "../api/stewards";
 import { getCustomers, Customer } from "../api/customers";
 import { SelectOption } from "../components/OrderDetailsPopup";
+import TableSelectPopup from "../components/TableSelectPopup";
+import { getTables, Table } from "../api/tables";
+import FinalizeBillPopup, { FinalizeBillForm } from "../components/FinalizeBillPopup";
 
-// Must match the AsyncStorage key used in api/client.ts's request interceptor
 const AUTH_TOKEN_KEY = "auth_token";
 
-// Required by the POS API but there's no restaurant-selection UI yet —
-// hardcoded for now. Swap this out once the app has a real restaurant picker.
 const DEFAULT_RESTAURANT_ID = 1;
 
 type NavPage = "dashboard" | "history" | "restaurant-dashboard" | "restaurant-orders";
@@ -90,6 +90,18 @@ function getImageUrl(image?: string | null): string | null {
   }
   const path = image.startsWith("/") ? image : `/${image}`;
   return `${API_BASE_URL}${STORAGE_PREFIX}${path}`;
+}
+
+// Backend requires order_date in "Y-m-d H:i:s" format (Laravel validation),
+// but FinalizeBillPopup's date field is date-only (YYYY-MM-DD) since that's
+// all the user needs to see/edit. Append the current time here so the
+// value sent to the API always matches what the backend expects.
+function formatDateTimeForBackend(dateOnly: string): string {
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  const ss = String(now.getSeconds()).padStart(2, "0");
+  return `${dateOnly} ${hh}:${mm}:${ss}`;
 }
 
 export default function DashboardScreen({
@@ -146,6 +158,27 @@ export default function DashboardScreen({
     total: number;
   } | null>(null);
 
+  // --- Finalize Bill popup state ---
+  // `financeContext` tracks WHICH order we're finalizing and where the flow
+  // should go afterwards, since this popup is triggered from two different
+  // places: right after placing a new order (finalizeImmediately toggle),
+  // and from the "Finalize" button on an existing running order.
+  const [financeVisible, setFinanceVisible] = useState(false);
+  const [financeSubmitting, setFinanceSubmitting] = useState(false);
+  const [financeContext, setFinanceContext] = useState<{
+    orderId: number | string;
+    total: number;
+    source: "new-order" | "running-order";
+    // Only needed for the "new-order" path, to populate the "Order Placed"
+    // confirmation popup afterwards.
+    placedOrderInfo?: {
+      orderNumber: number | string | null;
+      cart: CartLine[];
+      subtotal: number;
+      serviceCharge: number;
+    };
+  } | null>(null);
+
   // --- Running orders popup state ---
   const [runningOrders, setRunningOrders] = useState<RunningOrder[]>([]);
   const [runningOrdersVisible, setRunningOrdersVisible] = useState(false);
@@ -188,7 +221,8 @@ export default function DashboardScreen({
           { id: "walkin", label: "Walk-in Customer" },
           ...customers.map((c) => ({
             id: c.id,
-            label: c.lname ? `${c.name} ${c.lname}` : c.name,
+            label: c.last_name ? `${c.first_name} ${c.last_name}` : c.first_name,
+            roomNumbers: c.room_numbers ?? [],
           })),
         ];
         setCustomerOptions(options);
@@ -210,12 +244,49 @@ export default function DashboardScreen({
       setRunningLoading(false);
     }
   }, []);
-
+  const [tables, setTables] = useState<Table[]>([]);
+  const [tableModalVisible, setTableModalVisible] = useState(false);
+  const [tablesLoading, setTablesLoading] = useState(false);
+  const [selectedTable, setSelectedTable] = useState<Table | null>(null);
   useEffect(() => {
     fetchRunningOrders();
     const interval = setInterval(fetchRunningOrders, 5000);
     return () => clearInterval(interval);
   }, [fetchRunningOrders]);
+
+  const fetchTables = useCallback(async () => {
+    setTablesLoading(true);
+    try {
+      const list = await getTables();
+      setTables(list);
+    } catch (err) {
+      console.error("Failed to load tables:", err);
+    } finally {
+      setTablesLoading(false);
+    }
+  }, []);
+
+  function handleOpenTablePicker() {
+    setOrderDetailsVisible(false);
+    setTableModalVisible(true);
+    fetchTables();
+  }
+
+  function handleSelectTable(table: Table) {
+    setSelectedTable(table);
+    setTableModalVisible(false);
+    setOrderDetailsVisible(true);
+  }
+
+  function handleCloseTablePicker() {
+    setTableModalVisible(false);
+    setOrderDetailsVisible(true);
+  }
+
+  function tableLabelOf(t: Table | null): string | null {
+    if (!t) return null;
+    return String(t.table_no ?? t.name ?? t.id);
+  }
 
   // Fetch items for the "All" chip by merging every category's items
   const loadAllItems = useCallback(async () => {
@@ -416,11 +487,14 @@ export default function DashboardScreen({
         return;
       }
 
+      // DashboardScreen.tsx — handleSubmitOrder eke
+
       const response = await createOrUpdateOrder({
         order_id: "new",
         order_type: details.orderType,
         customer: String(details.customerId),
-        room: details.roomId != null ? String(details.roomId) : undefined,
+        room: details.roomId != null ? String(details.roomId) : "",
+        table_id: details.tableId != null ? details.tableId : null,
         steward_id: Number(stewardIdToSend),
         restaurant_id: DEFAULT_RESTAURANT_ID,
         service_charge: details.serviceChargeAmount,
@@ -437,19 +511,36 @@ export default function DashboardScreen({
         })),
       });
 
-      if (details.finalizeImmediately && response?.data?.order_id) {
-        await finalizeOrder({
-          order_id: response.data.order_id,
-          payment_method: "Cash",
-          paid_amount: details.total,
-          given_amount: details.total,
-          change_amount: 0,
-          order_date: new Date().toISOString(),
+      const newOrderId = response?.data?.order_id;
+
+      // If "Finalize Immediately" was toggled on, open the Finalize Bill
+      // popup instead of auto-finalizing — the user still needs to confirm
+      // given amount / payment method / etc, same as the web app.
+      if (details.finalizeImmediately && newOrderId) {
+        setOrderDetailsVisible(false);
+        setCart([]);
+        setSelectedTable(null);
+        setFinanceContext({
+          orderId: newOrderId,
+          total: details.total,
+          source: "new-order",
+          placedOrderInfo: {
+            orderNumber: response?.data?.order_number ?? null,
+            cart,
+            subtotal: details.subtotal,
+            serviceCharge: details.serviceChargeAmount,
+          },
         });
+        setFinanceVisible(true);
+        setOrderSubmitting(false);
+        fetchRunningOrders();
+        return;
       }
 
+      // Not finalizing immediately — order stays as a running order, show
+      // the normal "Order Placed" confirmation.
       setPlacedOrder({
-        orderId: response?.data?.order_id ?? null,
+        orderId: newOrderId ?? null,
         orderNumber: response?.data?.order_number ?? null,
         cart,
         subtotal: details.subtotal,
@@ -461,6 +552,7 @@ export default function DashboardScreen({
       setCartVisible(false);
       setOrderPlacedVisible(true);
       setCart([]);
+      setSelectedTable(null);
       fetchRunningOrders();
     } catch (err: any) {
       console.error(
@@ -486,27 +578,79 @@ export default function DashboardScreen({
     }
   }
 
-  async function handleFinalizeRunningOrder(order: RunningOrder) {
+  function handleFinalizeRunningOrder(order: RunningOrder) {
     const raw = (order as any).total ?? (order as any).grand_total ?? 0;
     const total = typeof raw === "string" ? parseFloat(raw) : raw;
-    const safeAmount = Number.isFinite(total) ? total : 0;
+    const safeTotal = Number.isFinite(total) ? total : 0;
 
+    setRunningOrdersVisible(false);
+    setFinanceContext({
+      orderId: order.id,
+      total: safeTotal,
+      source: "running-order",
+    });
+    setFinanceVisible(true);
+  }
+
+  async function handleSubmitFinalizeBill(form: FinalizeBillForm) {
+    if (!financeContext) return;
+    setFinanceSubmitting(true);
     try {
+      // `card_terminal` is only required by the backend when payment_method
+      // is "Card" — read it via `as any` since older FinalizeBillPopup
+      // versions may not define `cardTerminal` on the form type yet.
+      const cardTerminal = (form as any).cardTerminal as string | undefined;
+
       await finalizeOrder({
-        order_id: order.id,
-        payment_method: "Cash",
-        paid_amount: safeAmount,
-        given_amount: safeAmount,
-        change_amount: 0,
-        order_date: new Date().toISOString(),
+        order_id: financeContext.orderId,
+        payment_method: form.paymentMethod,
+        paid_amount: form.givenAmount,
+        given_amount: form.givenAmount,
+        change_amount: form.changeAmount,
+        // FIX: backend requires "Y-m-d H:i:s" — form.date is date-only
+        // (YYYY-MM-DD), so convert it before sending.
+        order_date: formatDateTimeForBackend(form.date),
+        customer_email: form.customerEmail || undefined,
+        ...(form.paymentMethod === "Card" && cardTerminal
+          ? { card_terminal: cardTerminal }
+          : {}),
       });
+
+      const wasNewOrder = financeContext.source === "new-order";
+      const placedInfo = financeContext.placedOrderInfo;
+
+      setFinanceVisible(false);
+      setFinanceContext(null);
+
+      if (wasNewOrder && placedInfo) {
+        // Now show the normal "Order Placed" success popup for the order
+        // that was just placed AND finalized.
+        setPlacedOrder({
+          orderId: financeContext.orderId,
+          orderNumber: placedInfo.orderNumber,
+          cart: placedInfo.cart,
+          subtotal: placedInfo.subtotal,
+          serviceCharge: placedInfo.serviceCharge,
+          total: form.givenAmount - form.changeAmount, // = original total
+        });
+        setOrderPlacedVisible(true);
+      }
+
       fetchRunningOrders();
     } catch (err: any) {
       console.error(
         "Failed to finalize order - validation errors:",
         JSON.stringify(err.response?.data, null, 2)
       );
+    } finally {
+      setFinanceSubmitting(false);
     }
+  }
+
+  function handleCloseFinalizeBill() {
+    setFinanceVisible(false);
+    setFinanceContext(null);
+    fetchRunningOrders();
   }
 
   // TODO: hook these up to a dedicated screen/modal once that flow is built
@@ -561,6 +705,9 @@ export default function DashboardScreen({
         submitting={orderSubmitting}
         customers={customerOptions}
         stewards={stewardOptions}
+        selectedTableId={selectedTable?.id ?? null}
+        selectedTableLabel={tableLabelOf(selectedTable)}
+        onOpenTablePicker={handleOpenTablePicker}
       />
 
       <OrderPlacedModal
@@ -586,6 +733,23 @@ export default function DashboardScreen({
         onSplit={handleSplitRunningOrder}
       />
 
+      <FinalizeBillPopup
+        visible={financeVisible}
+        orderId={financeContext?.orderId ?? null}
+        totalPayable={financeContext?.total ?? 0}
+        submitting={financeSubmitting}
+        onClose={handleCloseFinalizeBill}
+        onSubmit={handleSubmitFinalizeBill}
+      />
+
+      <TableSelectPopup
+        visible={tableModalVisible}
+        tables={tables}
+        loading={tablesLoading}
+        selectedTableId={selectedTable?.id ?? null}
+        onClose={handleCloseTablePicker}
+        onSelect={handleSelectTable}
+      />
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity

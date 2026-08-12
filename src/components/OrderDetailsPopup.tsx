@@ -10,7 +10,6 @@ import {
   ScrollView,
   ActivityIndicator,
 } from "react-native";
-import { getCustomerRooms } from "../api/rooms";
 
 export interface SelectOption {
   id: number | string;
@@ -21,8 +20,8 @@ export interface OrderDetailsForm {
   orderType: "Dine In" | "Take away";
   customerId: number | string;
   customerLabel: string;
-  roomId: number | string | null;
-  roomLabel: string | null;
+  tableId: number | string | null;
+  tableLabel: string | null;
   stewardId: number | string | null;
   stewardLabel: string | null;
   serviceChargeEnabled: boolean;
@@ -40,13 +39,22 @@ interface OrderDetailsPopupProps {
   onSubmit: (form: OrderDetailsForm) => void;
   submitting?: boolean;
   customers?: SelectOption[];
-  // Optional static fallback list — used only until the API call resolves,
-  // or if apiBaseUrl/authToken aren't supplied.
-  rooms?: SelectOption[];
   stewards?: SelectOption[];
   serviceChargePercent?: number;
+  // Table is picked via a separate popup owned by the parent screen
+  // (DashboardScreen) — this popup just shows the current selection and
+  // asks the parent to open the picker.
+  selectedTableId?: number | string | null;
+  selectedTableLabel?: string | null;
+  onOpenTablePicker: () => void;
 }
 
+// IMPORTANT: these must be module-level constants, not inline `= []`
+// default parameter values. An inline `[]` default creates a brand new
+// array reference on every render, which then cascades through
+// useMemo/useEffect dependency arrays below and causes an infinite
+// render loop ("Maximum update depth exceeded"). Module-level constants
+// keep the same reference across renders.
 const DEFAULT_CUSTOMERS: SelectOption[] = [
   { id: "walkin", label: "Walk-in Customer" },
 ];
@@ -133,23 +141,23 @@ export default function OrderDetailsPopup({
   onSubmit,
   submitting = false,
   customers = DEFAULT_CUSTOMERS,
-  rooms: roomsFallback = [],
   stewards = DEFAULT_STEWARDS,
   serviceChargePercent = 10,
+  selectedTableId = null,
+  selectedTableLabel = null,
+  onOpenTablePicker,
 }: OrderDetailsPopupProps) {
   const [orderType, setOrderType] = useState<"Dine In" | "Take away">(
     "Dine In"
   );
-  const [customer, setCustomer] = useState<SelectOption>(customers[0]);
-  const [room, setRoom] = useState<SelectOption | null>(null);
-  const [steward, setSteward] = useState<SelectOption>(stewards[0]);
+  const [customer, setCustomer] = useState<SelectOption>(
+    customers[0] ?? DEFAULT_CUSTOMERS[0]
+  );
+  const [steward, setSteward] = useState<SelectOption>(
+    stewards[0] ?? DEFAULT_STEWARDS[0]
+  );
   const [serviceChargeEnabled, setServiceChargeEnabled] = useState(true);
   const [finalizeImmediately, setFinalizeImmediately] = useState(false);
-
-  // Rooms loaded from the API for whichever customer is currently selected.
-  const [rooms, setRooms] = useState<SelectOption[]>(roomsFallback);
-  const [roomsLoading, setRoomsLoading] = useState(false);
-  const [roomsError, setRoomsError] = useState<string | null>(null);
 
   // `stewards` (and `customers`) load asynchronously from the API and often
   // arrive AFTER this component has already mounted with the default
@@ -174,67 +182,12 @@ export default function OrderDetailsPopup({
   useEffect(() => {
     if (visible) {
       setOrderType("Dine In");
-      setCustomer(customers[0]);
-      setRoom(null);
-      setSteward(stewards[0]);
+      setCustomer(customers[0] ?? DEFAULT_CUSTOMERS[0]);
+      setSteward(stewards[0] ?? DEFAULT_STEWARDS[0]);
       setServiceChargeEnabled(true);
       setFinalizeImmediately(false);
-      setRooms(roomsFallback);
-      setRoomsError(null);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
-
-  const isWalkIn = customer.id === "walkin" || customer.id === "none";
-
-  // Fetch rooms for the selected customer via POST /api/pos/customer_rooms
-  // (see routes/api.php — Api\HotelController@get_customer_rooms, and
-  // api/rooms.ts — getCustomerRooms).
-  useEffect(() => {
-    if (!visible || isWalkIn || !customer.id) {
-      setRooms(roomsFallback);
-      return;
-    }
-
-    let cancelled = false;
-
-    async function fetchRooms() {
-      setRoomsLoading(true);
-      setRoomsError(null);
-      setRoom(null); // reset previously selected room when customer changes
-      try {
-        const list = await getCustomerRooms(customer.id);
-        // Adjust this mapping if your API uses different field names.
-        const mapped: SelectOption[] = (list ?? []).map((r: any) => ({
-          id: r.id ?? r.room_id,
-          label: r.room_no ?? r.name ?? r.label ?? `Room ${r.id ?? r.room_id}`,
-        }));
-
-        if (!cancelled) {
-          setRooms(mapped);
-        }
-      } catch (err: any) {
-        console.error("Failed to load rooms:", err);
-        if (!cancelled) {
-          setRoomsError(
-            err?.response?.data?.message ?? "Failed to load rooms"
-          );
-          setRooms([]);
-        }
-      } finally {
-        if (!cancelled) {
-          setRoomsLoading(false);
-        }
-      }
-    }
-
-    fetchRooms();
-
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [customer.id, visible, isWalkIn]);
 
   const serviceChargeAmount = useMemo(
     () => (serviceChargeEnabled ? subtotal * (serviceChargePercent / 100) : 0),
@@ -247,8 +200,8 @@ export default function OrderDetailsPopup({
       orderType,
       customerId: customer.id,
       customerLabel: customer.label,
-      roomId: room?.id ?? null,
-      roomLabel: room?.label ?? null,
+      tableId: selectedTableId,
+      tableLabel: selectedTableLabel,
       stewardId: steward.id === "none" ? null : steward.id,
       stewardLabel: steward.id === "none" ? null : steward.label,
       serviceChargeEnabled,
@@ -315,6 +268,27 @@ export default function OrderDetailsPopup({
                 </TouchableOpacity>
               </View>
 
+              {/* Table — opens a separate popup (list of tables with chair
+                  count + occupied/empty status), owned by the parent screen. */}
+              <View style={styles.fieldGroup}>
+                <Text style={styles.fieldLabel}>Table</Text>
+                <TouchableOpacity
+                  style={styles.selectBox}
+                  onPress={onOpenTablePicker}
+                >
+                  <Text
+                    style={[
+                      styles.selectValue,
+                      !selectedTableLabel && styles.selectPlaceholder,
+                    ]}
+                    numberOfLines={1}
+                  >
+                    {selectedTableLabel ?? "Select table"}
+                  </Text>
+                  <Text style={styles.selectChevron}>▾</Text>
+                </TouchableOpacity>
+              </View>
+
               <SelectField
                 label="Customer"
                 value={customer.label}
@@ -322,28 +296,8 @@ export default function OrderDetailsPopup({
                 options={customers}
                 onChange={(opt) => {
                   setCustomer(opt);
-                  setRoom(null);
                 }}
               />
-
-              <SelectField
-                label="Room"
-                value={room?.label ?? null}
-                placeholder={
-                  isWalkIn
-                    ? "Select customer first"
-                    : roomsLoading
-                    ? "Loading rooms..."
-                    : "Select room"
-                }
-                options={rooms}
-                disabled={isWalkIn || roomsLoading || rooms.length === 0}
-                loading={roomsLoading}
-                onChange={setRoom}
-              />
-              {roomsError && (
-                <Text style={styles.roomsErrorText}>{roomsError}</Text>
-              )}
 
               <SelectField
                 label="Steward"
@@ -571,13 +525,6 @@ const styles = StyleSheet.create({
     color: "#9ca3af",
     paddingVertical: 20,
     fontSize: 14,
-  },
-  roomsErrorText: {
-    color: "#f4695f",
-    fontSize: 12,
-    fontWeight: "600",
-    marginTop: -10,
-    marginBottom: 12,
   },
   toggleRow: {
     flexDirection: "row",

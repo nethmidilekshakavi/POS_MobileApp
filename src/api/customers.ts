@@ -1,14 +1,15 @@
-
-
-
 import apiClient from "./client";
 
-// Field names are a best guess based on get_stewards' shape — check a real
-// response from GET /api/pos/customers and adjust if needed.
+// Matches the real response shape from GET /api/pos/customers:
+// { success: true, customers: [{ id, first_name, last_name, check_in_date,
+//   check_out_date, room_numbers: string[] }] }
 export interface Customer {
   id: number | string;
-  name: string;
-  lname?: string;
+  first_name: string;
+  last_name?: string;
+  check_in_date?: string;
+  check_out_date?: string;
+  room_numbers?: string[];
   [key: string]: any;
 }
 
