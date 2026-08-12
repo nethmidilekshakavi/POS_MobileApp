@@ -16,12 +16,22 @@ export interface SelectOption {
   label: string;
 }
 
+// Customer options coming from DashboardScreen carry each customer's rooms
+// straight from GET /pos/customers (`room_numbers: string[]`) — no separate
+// rooms endpoint exists, so this popup reads rooms off the selected
+// customer instead of fetching them.
+export interface CustomerOption extends SelectOption {
+  roomNumbers?: string[];
+}
+
 export interface OrderDetailsForm {
   orderType: "Dine In" | "Take away";
   customerId: number | string;
   customerLabel: string;
   tableId: number | string | null;
   tableLabel: string | null;
+  roomId: number | string | null;
+  roomLabel: string | null;
   stewardId: number | string | null;
   stewardLabel: string | null;
   serviceChargeEnabled: boolean;
@@ -38,7 +48,7 @@ interface OrderDetailsPopupProps {
   onCancel: () => void;
   onSubmit: (form: OrderDetailsForm) => void;
   submitting?: boolean;
-  customers?: SelectOption[];
+  customers?: CustomerOption[];
   stewards?: SelectOption[];
   serviceChargePercent?: number;
   // Table is picked via a separate popup owned by the parent screen
@@ -55,7 +65,7 @@ interface OrderDetailsPopupProps {
 // useMemo/useEffect dependency arrays below and causes an infinite
 // render loop ("Maximum update depth exceeded"). Module-level constants
 // keep the same reference across renders.
-const DEFAULT_CUSTOMERS: SelectOption[] = [
+const DEFAULT_CUSTOMERS: CustomerOption[] = [
   { id: "walkin", label: "Walk-in Customer" },
 ];
 const DEFAULT_STEWARDS: SelectOption[] = [{ id: "none", label: "None" }];
@@ -150,7 +160,7 @@ export default function OrderDetailsPopup({
   const [orderType, setOrderType] = useState<"Dine In" | "Take away">(
     "Dine In"
   );
-  const [customer, setCustomer] = useState<SelectOption>(
+  const [customer, setCustomer] = useState<CustomerOption>(
     customers[0] ?? DEFAULT_CUSTOMERS[0]
   );
   const [steward, setSteward] = useState<SelectOption>(
@@ -158,6 +168,21 @@ export default function OrderDetailsPopup({
   );
   const [serviceChargeEnabled, setServiceChargeEnabled] = useState(true);
   const [finalizeImmediately, setFinalizeImmediately] = useState(false);
+
+  // Rooms come straight from the selected customer's `room_numbers`
+  // (already loaded with the customer list by DashboardScreen) — walk-in
+  // and customers with no rooms just show an empty list.
+  const [room, setRoom] = useState<SelectOption | null>(null);
+  const roomOptions: SelectOption[] = useMemo(
+    () => (customer.roomNumbers ?? []).map((r) => ({ id: r, label: r })),
+    [customer.roomNumbers]
+  );
+
+  // Selecting a different customer invalidates whatever room was picked
+  // for the previous one.
+  useEffect(() => {
+    setRoom(null);
+  }, [customer.id]);
 
   // `stewards` (and `customers`) load asynchronously from the API and often
   // arrive AFTER this component has already mounted with the default
@@ -184,6 +209,7 @@ export default function OrderDetailsPopup({
       setOrderType("Dine In");
       setCustomer(customers[0] ?? DEFAULT_CUSTOMERS[0]);
       setSteward(stewards[0] ?? DEFAULT_STEWARDS[0]);
+      setRoom(null);
       setServiceChargeEnabled(true);
       setFinalizeImmediately(false);
     }
@@ -202,6 +228,8 @@ export default function OrderDetailsPopup({
       customerLabel: customer.label,
       tableId: selectedTableId,
       tableLabel: selectedTableLabel,
+      roomId: room?.id ?? null,
+      roomLabel: room?.label ?? null,
       stewardId: steward.id === "none" ? null : steward.id,
       stewardLabel: steward.id === "none" ? null : steward.label,
       serviceChargeEnabled,
@@ -297,6 +325,17 @@ export default function OrderDetailsPopup({
                 onChange={(opt) => {
                   setCustomer(opt);
                 }}
+              />
+
+              <SelectField
+                label="Room"
+                value={room?.label ?? null}
+                placeholder={
+                  roomOptions.length === 0 ? "No rooms for this customer" : "Select room"
+                }
+                options={roomOptions}
+                onChange={setRoom}
+                disabled={roomOptions.length === 0}
               />
 
               <SelectField

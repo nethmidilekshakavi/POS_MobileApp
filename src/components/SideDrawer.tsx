@@ -55,45 +55,14 @@ export default function SideDrawer({
       icon: "🧮",
       page: "dashboard",
     },
-    {
-      key: "history",
-      label: "History",
-      icon: "📋",
-      page: "history",
-    },
+
     {
       key: "restaurant-orders",
       label: "Restaurant Orders",
       icon: "🍽️",
       page: "restaurant-orders",
     },
-    {
-      key: "kot",
-      label: "KOT",
-      icon: "🧾",
-      page: "dashboard",
-    },
-    {
-      key: "recipes",
-      label: "Recipes (BOM)",
-      icon: "📖",
-      page: "dashboard",
-    },
 
-    // ⭐ MENU ITEMS → REAL MENU PAGE
-    {
-      key: "menu-items",
-      label: "Menu Items",
-      icon: "🍔",
-      page: "menu-items",
-    },
-
-    {
-      key: "qr-orders",
-      label: "QR Table Orders",
-      icon: "📱",
-      page: "dashboard",
-    },
     {
       key: "terminal-access",
       label: "POS Terminal Access",
@@ -124,11 +93,7 @@ export default function SideDrawer({
             {/* HEADER */}
 
             <View style={styles.drawerHeader}>
-              <View style={styles.drawerIcon}>
-                <Text style={{ fontSize: 26 }}>
-                  🏢
-                </Text>
-              </View>
+
 
               <Text style={styles.drawerTitle}>
                 POS SYSTEM

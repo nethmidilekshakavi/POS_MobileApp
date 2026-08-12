@@ -18,7 +18,7 @@ import DateTimePicker, {
 import SideDrawer from "../components/SideDrawer";
 
 const AUTH_TOKEN_KEY = "auth_token";
-const API_BASE_URL = "https://demo.trackerstay.com";
+const API_BASE_URL = "https://live.trackerstay.com";
 
 type NavPage = "dashboard" | "history" | "restaurant-dashboard" | "restaurant-orders";
 
@@ -46,10 +46,6 @@ interface SaleItemRow {
 }
 
 interface SalesSummaryResponse {
-  // The POS API doc doesn't document this endpoint's exact shape, so this
-  // type (and the pick* helpers below) are written defensively — they try
-  // several likely field names instead of assuming one. Tighten this once
-  // you confirm the real response from /api/v1/pos/sales.
   success?: boolean;
   today?: Record<string, any>;
   monthly?: Record<string, any>;
@@ -66,7 +62,6 @@ interface SalesSummaryResponse {
   total?: number;
 }
 
-// Shared palette — kept in sync with RestaurantOrdersScreen.tsx
 const COLORS = {
   primary: "#f4695f",
   primaryLight: "#fdece9",
