@@ -205,7 +205,7 @@ const styles = StyleSheet.create({
   closeBtnText: { fontSize: 15, fontWeight: "700", color: "#b45309" },
   submitBtn: {
     flex: 1.4,
-    backgroundColor: "#4338ca",
+    backgroundColor: "#f4695f",
     borderRadius: 14,
     paddingVertical: 14,
     alignItems: "center",

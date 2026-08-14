@@ -604,8 +604,10 @@ export default function DashboardScreen({
       setCancelPopupVisible(false);
       setCancelTargetOrder(null);
       fetchRunningOrders();
+      Alert.alert("Order Cancelled", "The order was cancelled successfully.");
     } catch (err) {
       console.error("Failed to cancel order:", err);
+      Alert.alert("Cancel Failed", "Something went wrong while cancelling the order. Please try again.");
     } finally {
       setCancelSubmitting(false);
     }
