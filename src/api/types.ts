@@ -65,6 +65,7 @@ export type RunningOrder = {
   id: number;
   order_id: string;
   status: string;
+  is_ready?: boolean;   // <-- add this
   customer_name?: string;
   created_at?: string;
 };

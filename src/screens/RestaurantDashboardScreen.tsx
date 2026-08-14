@@ -41,6 +41,7 @@ import { CustomerOption, SelectOption } from "../components/OrderDetailsPopup";
 import TableSelectPopup from "../components/TableSelectPopup";
 import { getTables, Table } from "../api/tables";
 import FinalizeBillPopup, { FinalizeBillForm } from "../components/FinalizeBillPopup";
+import CancelOrderPopup from "../components/CancelOrderPopup";
 
 const AUTH_TOKEN_KEY = "auth_token";
 
@@ -188,6 +189,16 @@ export default function DashboardScreen({
   const [runningOrders, setRunningOrders] = useState<RunningOrder[]>([]);
   const [runningOrdersVisible, setRunningOrdersVisible] = useState(false);
   const [runningLoading, setRunningLoading] = useState(false);
+
+  // --- Cancel Order (reason) popup state ---
+  // Opened from handleCancelRunningOrder for any order whose status is NOT
+  // the uncancellable one. Captures a cancellation reason before actually
+  // calling the cancel API.
+  const [cancelPopupVisible, setCancelPopupVisible] = useState(false);
+  const [cancelTargetOrder, setCancelTargetOrder] = useState<RunningOrder | null>(
+    null
+  );
+  const [cancelSubmitting, setCancelSubmitting] = useState(false);
 
   // Load auth token once, so it can be attached to image requests below
   useEffect(() => {
@@ -573,24 +584,36 @@ export default function DashboardScreen({
   }
 
   // Kitchen has already marked an order Ready — too late to cancel from the
-  // POS at that point, so block it here (before the confirm/cancel request
-  // ever goes out) with a clear explanation instead of a silent failure or
-  // a confusing backend error.
-  async function handleCancelRunningOrder(order: RunningOrder) {
-    if (order.status === UNCANCELLABLE_STATUS) {
-      Alert.alert(
-        "Cannot Cancel Order",
-        "This order is already marked Ready by the kitchen and can no longer be cancelled."
-      );
-      return;
-    }
+  // POS at that point, so block it here (before any cancel request ever
+  // goes out) with a clear explanation instead of a silent failure or a
+  // confusing backend error. Otherwise, open the reason-confirmation popup
+  // instead of cancelling immediately.
+ function handleCancelRunningOrder(order: RunningOrder) {
+   setRunningOrdersVisible(false);
+   setCancelTargetOrder(order);
+   setCancelPopupVisible(true);
+ }
 
+  // Called from CancelOrderPopup's Submit button, once a reason has been
+  // entered (or left blank, if the popup doesn't require one).
+  async function handleSubmitCancelOrder(reason: string) {
+    if (!cancelTargetOrder) return;
+    setCancelSubmitting(true);
     try {
-      await cancelOrder({ order_id: order.id, reason: "Cancelled from POS" });
+      await cancelOrder({ order_id: cancelTargetOrder.id, reason });
+      setCancelPopupVisible(false);
+      setCancelTargetOrder(null);
       fetchRunningOrders();
     } catch (err) {
       console.error("Failed to cancel order:", err);
+    } finally {
+      setCancelSubmitting(false);
     }
+  }
+
+  function handleCloseCancelPopup() {
+    setCancelPopupVisible(false);
+    setCancelTargetOrder(null);
   }
 
   function handleFinalizeRunningOrder(order: RunningOrder) {
@@ -756,6 +779,15 @@ export default function DashboardScreen({
         onClose={handleCloseFinalizeBill}
         onSubmit={handleSubmitFinalizeBill}
       />
+
+     <CancelOrderPopup
+       visible={cancelPopupVisible}
+       orderId={cancelTargetOrder?.id ?? null}
+       isReady={cancelTargetOrder?.is_ready ?? false}
+       submitting={cancelSubmitting}
+       onClose={handleCloseCancelPopup}
+       onSubmit={handleSubmitCancelOrder}
+     />
 
       <TableSelectPopup
         visible={tableModalVisible}
