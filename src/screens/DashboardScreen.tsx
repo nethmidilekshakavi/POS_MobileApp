@@ -32,34 +32,57 @@ interface RestaurantDashboardScreenProps {
   onSendMail?: () => void;
 }
 
-interface SaleItemRow {
-  id?: number | string;
-  item_name?: string;
+// ---------------------------------------------------------------------------
+// Types matching the REAL response of
+//   GET /api/v1/pos/sales  (Api\HotelController@SelcteddaterangePOsSale)
+// confirmed via:
+//   Invoke-RestMethod -Uri ".../api/v1/pos/sales?date=...&from_date=...&to_date=..."
+// ---------------------------------------------------------------------------
+
+interface SaleOrderItem {
+  name: string;
+  quantity: number;
+  line_total: number;
+}
+
+interface SaleOrderCustomer {
   name?: string;
-  price?: number | string;
-  quantity?: number | string;
-  qty?: number | string;
-  amount?: number | string;
-  total?: number | string;
-  paid_status?: string;
+  email?: string;
+  phone?: string;
+  reservation_id?: string | number | null;
+  room_id?: string | number | null;
+  room_number?: string | number | null;
+}
+
+interface SaleOrderDetails {
+  type?: string;
   status?: string;
+  payment_method?: string;
+  paid_amount?: number | string;
+  grand_total?: number | string;
+}
+
+interface SaleOrder {
+  order_id: number | string;
+  invoice_id?: number | string;
+  invoice_no?: string | null;
+  customer?: SaleOrderCustomer;
+  order: SaleOrderDetails;
+  items: SaleOrderItem[];
+}
+
+interface PaymentMethodBreakdown {
+  payment_method: string;
+  orders_count: number;
+  total: number | string;
 }
 
 interface SalesSummaryResponse {
   success?: boolean;
-  today?: Record<string, any>;
-  monthly?: Record<string, any>;
-  today_total_sale?: number | string;
-  today_total_cost?: number | string;
-  today_total_income?: number | string;
-  monthly_total_sale?: number | string;
-  monthly_total_cost?: number | string;
-  monthly_total_income?: number | string;
-  items?: SaleItemRow[];
-  data?: SaleItemRow[];
-  current_page?: number;
-  last_page?: number;
-  total?: number;
+  orders?: SaleOrder[];
+  overall_grand_total?: number | string;
+  overall_paid_amount?: number | string;
+  by_payment_method?: PaymentMethodBreakdown[];
 }
 
 const COLORS = {
@@ -88,22 +111,14 @@ function money(value: number | string | undefined): string {
   return Number.isFinite(n) ? (n as number).toFixed(0) : "0";
 }
 
-// Tries several possible key names for a stat, since the exact response
-// shape from the sales endpoint isn't documented yet.
-function pick(obj: Record<string, any> | undefined, keys: string[]): number {
-  if (!obj) return 0;
-  for (const k of keys) {
-    if (obj[k] !== undefined && obj[k] !== null) {
-      const v = obj[k];
-      const n = typeof v === "string" ? parseFloat(v) : v;
-      if (Number.isFinite(n)) return n as number;
-    }
-  }
-  return 0;
-}
-
 function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
+}
+
+function firstOfMonthISO(): string {
+  const d = new Date();
+  d.setDate(1);
+  return d.toISOString().slice(0, 10);
 }
 
 function shiftDate(iso: string, days: number): string {
@@ -131,10 +146,43 @@ function dateToISO(d: Date): string {
 }
 
 function paidStatusStyle(status: string): { color: string; bg: string } {
-  const s = status.toLowerCase();
-  if (s.includes("paid") && !s.includes("un")) return { color: COLORS.green, bg: COLORS.greenLight };
-  if (s.includes("unpaid") || s.includes("pending")) return { color: COLORS.amber, bg: COLORS.amberLight };
+  const s = (status || "").toLowerCase();
+  if (s.includes("complete") || (s.includes("paid") && !s.includes("un")))
+    return { color: COLORS.green, bg: COLORS.greenLight };
+  if (s.includes("unpaid") || s.includes("pending") || s.includes("open"))
+    return { color: COLORS.amber, bg: COLORS.amberLight };
+  if (s.includes("cancel") || s.includes("void"))
+    return { color: COLORS.red, bg: COLORS.redLight };
   return { color: COLORS.gray, bg: COLORS.grayPillBg };
+}
+
+// Fetches the /api/v1/pos/sales totals for an arbitrary date range.
+// Used twice: once for "today" and once for "this month so far".
+async function fetchRangeTotals(
+  token: string | null,
+  fromDate: string,
+  toDate: string
+): Promise<{ sale: number; income: number }> {
+  const params = new URLSearchParams({
+    from_date: fromDate,
+    to_date: toDate,
+  });
+  const res = await fetch(`${API_BASE_URL}/api/v1/pos/sales?${params.toString()}`, {
+    headers: {
+      Accept: "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+  if (!res.ok) throw new Error(`Request failed (${res.status})`);
+  const json: SalesSummaryResponse = await res.json();
+  const toNum = (v: number | string | undefined) => {
+    const n = typeof v === "string" ? parseFloat(v) : v ?? 0;
+    return Number.isFinite(n) ? (n as number) : 0;
+  };
+  return {
+    sale: toNum(json.overall_grand_total),
+    income: toNum(json.overall_paid_amount),
+  };
 }
 
 export default function RestaurantDashboardScreen({
@@ -147,7 +195,6 @@ export default function RestaurantDashboardScreen({
   const [drawerOpen, setDrawerOpen] = useState(false);
 
   const [selectedDate, setSelectedDate] = useState(todayISO());
-  const [dateDraft, setDateDraft] = useState(todayISO());
 
   // --- Calendar picker state ---
   // On Android the native picker is a one-shot dialog (opens, pick, closes
@@ -159,42 +206,33 @@ export default function RestaurantDashboardScreen({
 
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [page, setPage] = useState(1);
 
-  const [rows, setRows] = useState<SaleItemRow[]>([]);
-  const [total, setTotal] = useState(0);
-  const [lastPage, setLastPage] = useState(1);
+  const [orders, setOrders] = useState<SaleOrder[]>([]);
 
-  const [todayStats, setTodayStats] = useState({ sale: 0, cost: 0, income: 0 });
-  const [monthlyStats, setMonthlyStats] = useState({ sale: 0, cost: 0, income: 0 });
+  const [todayStats, setTodayStats] = useState({ sale: 0, income: 0 });
+  const [monthlyStats, setMonthlyStats] = useState({ sale: 0, income: 0 });
 
   const [loading, setLoading] = useState(false);
+  const [statsLoading, setStatsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Debounce search input so we don't fire a request per keystroke
+  // Debounce search input (client-side filter — the API has no documented
+  // `search` param, so we filter the already-fetched orders locally).
   useEffect(() => {
-    const t = setTimeout(() => {
-      setDebouncedSearch(search.trim());
-      setPage(1);
-    }, 400);
+    const t = setTimeout(() => setDebouncedSearch(search.trim().toLowerCase()), 400);
     return () => clearTimeout(t);
   }, [search]);
 
-  const fetchDashboard = useCallback(async () => {
+  const fetchOrdersForDate = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       const token = await AsyncStorage.getItem(AUTH_TOKEN_KEY);
       const params = new URLSearchParams({
         date: selectedDate,
-        // Endpoint name (SelcteddaterangePOsSale) hints at a from/to range —
-        // sending the same day for both covers that possibility too.
         from_date: selectedDate,
         to_date: selectedDate,
-        per_page: "10",
-        page: String(page),
       });
-      if (debouncedSearch) params.set("search", debouncedSearch);
 
       const res = await fetch(`${API_BASE_URL}/api/v1/pos/sales?${params.toString()}`, {
         headers: {
@@ -205,56 +243,53 @@ export default function RestaurantDashboardScreen({
       if (!res.ok) throw new Error(`Request failed (${res.status})`);
       const json: SalesSummaryResponse = await res.json();
 
-      setTodayStats({
-        sale: pick(json.today, ["total_sale", "sale"]) || pick(json, ["today_total_sale"]),
-        cost: pick(json.today, ["total_cost", "cost"]) || pick(json, ["today_total_cost"]),
-        income: pick(json.today, ["total_income", "income"]) || pick(json, ["today_total_income"]),
-      });
-      setMonthlyStats({
-        sale: pick(json.monthly, ["total_sale", "sale"]) || pick(json, ["monthly_total_sale"]),
-        cost: pick(json.monthly, ["total_cost", "cost"]) || pick(json, ["monthly_total_cost"]),
-        income: pick(json.monthly, ["total_income", "income"]) || pick(json, ["monthly_total_income"]),
-      });
-
-      const list = json.items ?? json.data ?? [];
-      setRows(list);
-      setTotal(json.total ?? list.length);
-      setLastPage(json.last_page ?? 1);
+      setOrders(json.orders ?? []);
     } catch (err: any) {
-      console.error("Failed to load restaurant dashboard:", err);
-      setError(err?.message ?? "Failed to load dashboard");
-      setRows([]);
+      console.error("Failed to load restaurant orders:", err);
+      setError(err?.message ?? "Failed to load orders");
+      setOrders([]);
     } finally {
       setLoading(false);
     }
-  }, [selectedDate, page, debouncedSearch]);
+  }, [selectedDate]);
+
+  // Today / Monthly summary cards need two separate range requests, since
+  // the endpoint only returns totals for whatever from_date/to_date you pass —
+  // there's no separate "today" vs "monthly" field in a single response.
+  const fetchStats = useCallback(async () => {
+    setStatsLoading(true);
+    try {
+      const token = await AsyncStorage.getItem(AUTH_TOKEN_KEY);
+      const today = todayISO();
+      const [todayTotals, monthlyTotals] = await Promise.all([
+        fetchRangeTotals(token, today, today),
+        fetchRangeTotals(token, firstOfMonthISO(), today),
+      ]);
+      setTodayStats(todayTotals);
+      setMonthlyStats(monthlyTotals);
+    } catch (err) {
+      console.error("Failed to load sales stats:", err);
+      // Leave previous values in place rather than zeroing them out on a
+      // transient failure.
+    } finally {
+      setStatsLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
-    fetchDashboard();
-  }, [fetchDashboard]);
+    fetchOrdersForDate();
+  }, [fetchOrdersForDate]);
 
-  function applyDateDraft() {
-    if (isValidISODate(dateDraft)) {
-      setSelectedDate(dateDraft);
-      setPage(1);
-    } else {
-      // fall back silently to the last valid date rather than crashing
-      setDateDraft(selectedDate);
-    }
-  }
+  useEffect(() => {
+    fetchStats();
+  }, [fetchStats]);
 
   function goToday() {
-    const d = todayISO();
-    setSelectedDate(d);
-    setDateDraft(d);
-    setPage(1);
+    setSelectedDate(todayISO());
   }
 
   function shiftSelectedDate(days: number) {
-    const next = shiftDate(selectedDate, days);
-    setSelectedDate(next);
-    setDateDraft(next);
-    setPage(1);
+    setSelectedDate((prev) => shiftDate(prev, days));
   }
 
   // --- Calendar picker handlers ---
@@ -268,10 +303,7 @@ export default function RestaurantDashboardScreen({
       // Android dialog closes itself after pick/cancel — mirror that here.
       setPickerVisible(false);
       if (event.type === "dismissed" || !date) return;
-      const iso = dateToISO(date);
-      setSelectedDate(iso);
-      setDateDraft(iso);
-      setPage(1);
+      setSelectedDate(dateToISO(date));
       return;
     }
     // iOS: just track the in-progress selection, applied on "Done".
@@ -279,20 +311,33 @@ export default function RestaurantDashboardScreen({
   }
 
   function confirmIosDate() {
-    const iso = dateToISO(tempPickerDate);
-    setSelectedDate(iso);
-    setDateDraft(iso);
-    setPage(1);
+    setSelectedDate(dateToISO(tempPickerDate));
     setPickerVisible(false);
   }
+
+  // Client-side search across customer name, order id, invoice no, and item names.
+  const filteredOrders = useMemo(() => {
+    if (!debouncedSearch) return orders;
+    return orders.filter((o) => {
+      const haystack = [
+        o.customer?.name,
+        o.customer?.phone,
+        String(o.order_id),
+        o.invoice_no,
+        ...(o.items ?? []).map((it) => it.name),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(debouncedSearch);
+    });
+  }, [orders, debouncedSearch]);
 
   const statCards = useMemo(
     () => [
       { label: "Today Total Sale", value: todayStats.sale },
-      { label: "Today Total Cost", value: todayStats.cost },
       { label: "Today Total Income", value: todayStats.income },
       { label: "Monthly Total Sale", value: monthlyStats.sale },
-      { label: "Monthly Total Cost", value: monthlyStats.cost },
       { label: "Monthly Total Income", value: monthlyStats.income },
     ],
     [todayStats, monthlyStats]
@@ -361,14 +406,16 @@ export default function RestaurantDashboardScreen({
           <View style={styles.hamburgerBar} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Restaurant Dashboard</Text>
-        <TouchableOpacity style={styles.mailBtn} onPress={onSendMail}>
-          <Text style={styles.mailBtnText}>Mail</Text>
-        </TouchableOpacity>
+
+
+
+
+        
       </View>
 
       <FlatList
-        data={rows}
-        keyExtractor={(item, idx) => String(item.id ?? idx)}
+        data={filteredOrders}
+        keyExtractor={(item, idx) => String(item.order_id ?? idx)}
         contentContainerStyle={{
           paddingHorizontal: 20,
           paddingBottom: insets.bottom + 24,
@@ -382,7 +429,7 @@ export default function RestaurantDashboardScreen({
                 <Text style={styles.dateArrowText}>‹</Text>
               </TouchableOpacity>
 
-              {/* Tapping anywhere on this box now opens the calendar picker
+              {/* Tapping anywhere on this box opens the calendar picker
                   instead of relying on manual YYYY-MM-DD typing. */}
               <TouchableOpacity
                 style={styles.dateInputWrap}
@@ -406,7 +453,11 @@ export default function RestaurantDashboardScreen({
               {statCards.map((s) => (
                 <View key={s.label} style={styles.statCard}>
                   <Text style={styles.statLabel}>{s.label}</Text>
-                  <Text style={styles.statValue}>Rs.{money(s.value)}</Text>
+                  {statsLoading ? (
+                    <ActivityIndicator size="small" color={COLORS.teal} />
+                  ) : (
+                    <Text style={styles.statValue}>Rs.{money(s.value)}</Text>
+                  )}
                 </View>
               ))}
             </View>
@@ -416,7 +467,7 @@ export default function RestaurantDashboardScreen({
               <Text style={styles.searchIcon}>🔍</Text>
               <TextInput
                 style={styles.searchInput}
-                placeholder="Type in to Search"
+                placeholder="Search by customer, item, invoice..."
                 placeholderTextColor={COLORS.grayLight}
                 value={search}
                 onChangeText={setSearch}
@@ -432,40 +483,58 @@ export default function RestaurantDashboardScreen({
               <ActivityIndicator size="large" color={COLORS.primary} style={{ marginTop: 16 }} />
             )}
 
-            <Text style={styles.itemsHeading}>Items</Text>
+            <Text style={styles.itemsHeading}>Orders</Text>
           </View>
         }
-        renderItem={({ item }) => {
-          const name = item.item_name ?? item.name ?? "-";
-          const price = item.price ?? 0;
-          const qty = item.quantity ?? item.qty ?? 0;
-          const amount = item.amount ?? item.total ?? 0;
-          const status = item.paid_status ?? item.status ?? "-";
-          const statusColors = paidStatusStyle(String(status));
+        renderItem={({ item: order }) => {
+          const statusColors = paidStatusStyle(order.order?.status ?? "");
           return (
             <View style={styles.card}>
               <View style={styles.cardRowTop}>
                 <Text style={styles.itemName} numberOfLines={1}>
-                  {name}
+                  {order.customer?.name ?? `Order #${order.order_id}`}
                 </Text>
                 <View style={[styles.statusPill, { backgroundColor: statusColors.bg }]}>
                   <Text style={[styles.statusText, { color: statusColors.color }]}>
-                    {status}
+                    {order.order?.status ?? "-"}
                   </Text>
                 </View>
               </View>
               <View style={styles.divider} />
+
+              {order.customer?.phone && (
+                <View style={styles.cardRow}>
+                  <Text style={styles.label}>Phone</Text>
+                  <Text style={styles.value}>{order.customer.phone}</Text>
+                </View>
+              )}
               <View style={styles.cardRow}>
-                <Text style={styles.label}>Price</Text>
-                <Text style={styles.value}>Rs. {money(price)}</Text>
+                <Text style={styles.label}>Type</Text>
+                <Text style={styles.value}>{order.order?.type ?? "-"}</Text>
               </View>
               <View style={styles.cardRow}>
-                <Text style={styles.label}>Quantity</Text>
-                <Text style={styles.value}>{qty}</Text>
+                <Text style={styles.label}>Payment</Text>
+                <Text style={styles.value}>{order.order?.payment_method ?? "-"}</Text>
+              </View>
+
+              <View style={styles.divider} />
+              {(order.items ?? []).map((it, idx) => (
+                <View key={idx} style={styles.cardRow}>
+                  <Text style={styles.label}>
+                    {it.name} × {it.quantity}
+                  </Text>
+                  <Text style={styles.value}>Rs. {money(it.line_total)}</Text>
+                </View>
+              ))}
+
+              <View style={styles.divider} />
+              <View style={styles.cardRow}>
+                <Text style={styles.label}>Paid</Text>
+                <Text style={styles.value}>Rs. {money(order.order?.paid_amount)}</Text>
               </View>
               <View style={styles.cardRow}>
-                <Text style={styles.label}>Amount</Text>
-                <Text style={styles.amountValue}>Rs. {money(amount)}</Text>
+                <Text style={styles.label}>Grand Total</Text>
+                <Text style={styles.amountValue}>Rs. {money(order.order?.grand_total)}</Text>
               </View>
             </View>
           );
@@ -474,30 +543,7 @@ export default function RestaurantDashboardScreen({
           !loading && !error ? (
             <View style={styles.emptyWrap}>
               <Text style={styles.emptyEmoji}>📊</Text>
-              <Text style={styles.emptyState}>No data available in table</Text>
-            </View>
-          ) : null
-        }
-        ListFooterComponent={
-          !loading && rows.length > 0 ? (
-            <View style={styles.pagination}>
-              <TouchableOpacity
-                style={[styles.pageBtn, page <= 1 && styles.pageBtnDisabled]}
-                onPress={() => setPage((p) => Math.max(1, p - 1))}
-                disabled={page <= 1}
-              >
-                <Text style={styles.pageBtnText}>‹ Prev</Text>
-              </TouchableOpacity>
-              <Text style={styles.pageIndicator}>
-                Page {page} of {lastPage} · {total} total
-              </Text>
-              <TouchableOpacity
-                style={[styles.pageBtn, page >= lastPage && styles.pageBtnDisabled]}
-                onPress={() => setPage((p) => Math.min(lastPage, p + 1))}
-                disabled={page >= lastPage}
-              >
-                <Text style={styles.pageBtnText}>Next ›</Text>
-              </TouchableOpacity>
+              <Text style={styles.emptyState}>No orders found for this date</Text>
             </View>
           ) : null
         }
@@ -654,6 +700,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     backgroundColor: COLORS.cardBg,
     marginBottom: 10,
+    minHeight: 62,
+    justifyContent: "center",
   },
   statLabel: {
     fontSize: 12,
@@ -744,7 +792,7 @@ const styles = StyleSheet.create({
   divider: {
     height: 1,
     backgroundColor: COLORS.borderLight,
-    marginBottom: 10,
+    marginVertical: 8,
   },
   cardRow: {
     flexDirection: "row",
@@ -755,6 +803,8 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: COLORS.gray,
     fontWeight: "600",
+    flexShrink: 1,
+    marginRight: 8,
   },
   value: {
     fontSize: 13,
@@ -777,33 +827,6 @@ const styles = StyleSheet.create({
   emptyState: {
     textAlign: "center",
     color: COLORS.grayLight,
-    fontWeight: "600",
-  },
-  pagination: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    marginTop: 18,
-  },
-  pageBtn: {
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    backgroundColor: COLORS.bg,
-  },
-  pageBtnDisabled: {
-    opacity: 0.4,
-  },
-  pageBtnText: {
-    fontSize: 13,
-    fontWeight: "700",
-    color: COLORS.dark,
-  },
-  pageIndicator: {
-    fontSize: 12,
-    color: COLORS.gray,
     fontWeight: "600",
   },
 });

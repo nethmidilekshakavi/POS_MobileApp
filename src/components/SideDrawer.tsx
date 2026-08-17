@@ -12,7 +12,7 @@ type NavPage =
   | "dashboard"
   | "history"
   | "restaurant-dashboard"
-  | "restaurant-orders"
+//   | "restaurant-orders"
   | "menu-items";
 
 interface SideDrawerProps {
@@ -56,19 +56,19 @@ export default function SideDrawer({
       page: "dashboard",
     },
 
-    {
-      key: "restaurant-orders",
-      label: "Restaurant Orders",
-      icon: "🍽️",
-      page: "restaurant-orders",
-    },
+//     {
+//       key: "restaurant-orders",
+//       label: "Restaurant Orders",
+//       icon: "🍽️",
+//       page: "restaurant-orders",
+//     },
 
-    {
-      key: "terminal-access",
-      label: "POS Terminal Access",
-      icon: "🔐",
-      page: "dashboard",
-    },
+//     {
+//       key: "terminal-access",
+//       label: "POS Terminal Access",
+//       icon: "🔐",
+//       page: "dashboard",
+//     },
   ];
 
   function handlePress(page: NavPage) {
